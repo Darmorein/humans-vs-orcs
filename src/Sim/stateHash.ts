@@ -47,6 +47,8 @@ export function hashGameSnapshot(snap: GameStateSnapshot): string {
     rngState: snap.rngState,
     idAllocators: snap.idAllocators,
     players: [...snap.players].sort((a, b) => a.id.localeCompare(b.id)),
+    matchElapsedSec: snap.matchElapsedSec ?? 0,
+    dominancePhase: snap.dominancePhase ?? false,
     entities: [...snap.entities].sort((a, b) => a.id - b.id),
     settlements: [...snap.settlements].sort((a, b) => a.id.localeCompare(b.id)),
     squads: snap.squads ? [...snap.squads].sort((a, b) => a.id.localeCompare(b.id)) : [],

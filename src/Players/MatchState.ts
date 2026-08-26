@@ -37,8 +37,13 @@ export class PlayerState implements Player {
   public treasuryIncomeRate = 0;
   /** Last tax-tick remittances for HUD / settlement panel. */
   public taxContributions: TaxContribution[] = [];
+  /**
+   * Designated capital settlement seat id.
+   * Set on first TC reconcile / spawn; capital destroy is primary victory.
+   */
+  public capitalSettlementId: string | null = null;
 
-  constructor(init: Player & { gold?: number; taxPolicy?: TaxPolicy }) {
+  constructor(init: Player & { gold?: number; taxPolicy?: TaxPolicy; capitalSettlementId?: string | null }) {
     this.id = init.id;
     this.factionId = init.factionId;
     this.controllerType = init.controllerType;
@@ -46,6 +51,9 @@ export class PlayerState implements Player {
     this.displayName = init.displayName;
     this.gold = init.gold ?? 300;
     if (init.taxPolicy) this.taxPolicy = init.taxPolicy;
+    if (init.capitalSettlementId !== undefined) {
+      this.capitalSettlementId = init.capitalSettlementId;
+    }
   }
 
   public get faction() {
@@ -62,6 +70,10 @@ export class MatchState {
 
   public readonly players = new Map<string, PlayerState>();
   public localPlayerId: string;
+  /** Sim seconds since match start (for soft dominance). */
+  public matchElapsedSec = 0;
+  /** After MATCH_SOFT_CAP_SEC — mild score pressure / optional soft resolve. */
+  public dominancePhase = false;
 
   constructor(players: PlayerState[], localPlayerId: string) {
     for (const p of players) this.players.set(p.id, p);

@@ -40,9 +40,11 @@ export function createSettlerGroupId(): string {
 
 export const SETTLER_CITIZENS = 5;
 export const SETTLER_WORKERS = 3;
-export const SETTLER_GOLD_COST = 100;
+/** Legacy catalog defaults — live costs come from FactionDoctrine (raised for City2 delay). */
+export const SETTLER_GOLD_COST = 165;
 export const SETTLER_WOOD_COST = 40;
-/** Parent must be at least this large (civic pop). */
-export const SETTLER_MIN_PARENT_POP = 12;
+/** Parent must be at least this large (civic pop) — doctrine overrides per faction. */
+export const SETTLER_MIN_PARENT_POP = 20;
 export const FOUNDING_ARRIVAL_DIST = 48;
-export const SETTLER_CARAVAN_SPEED = 42;
+/** Slightly faster caravan once founding is allowed. */
+export const SETTLER_CARAVAN_SPEED = 55;

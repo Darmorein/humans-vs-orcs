@@ -143,11 +143,12 @@ export class AISystem {
       this.thinkTimer = 0;
       this.reassess(entities, gameMap);
       this.manageTaxPolicy();
+      this.manageCityFocuses();
       this.manageEconomyTerritory(entities, gameMap);
       this.manageConstruction(entities, gameMap);
       this.manageTraining(entities);
-      this.tryExpandSettlement(entities, gameMap);
       this.tryEstablishOutpost(entities, gameMap);
+      this.tryExpandSettlement(entities, gameMap);
       this.positionGuards(entities, gameMap);
       this.checkRetreat(entities, gameMap);
     }
@@ -321,6 +322,39 @@ export class AISystem {
     });
   }
 
+  /**
+   * Multi-city roles: capital economy/crafting, frontier military/defense.
+   * Only when 2+ seats; does not spam every tick (focus already set).
+   */
+  private manageCityFocuses() {
+    if (!this.settlements) return;
+    const player = this.getPlayer();
+    if (!player) return;
+    const seats = this.settlements
+      .allForOwner(this.playerId)
+      .filter((s) => s.hasTownCenter);
+    if (seats.length < 2) return;
+
+    const capitalId = player.capitalSettlementId;
+    for (const s of seats) {
+      const isCap = capitalId === s.id || (!capitalId && s === seats[0]);
+      const want = isCap
+        ? player.factionId === 'humans'
+          ? 'crafting'
+          : 'economy'
+        : s.threatPressure > 0.35
+          ? 'defense'
+          : 'military';
+      if (s.focus === want) continue;
+      this.enqueue({
+        type: 'setSettlementFocus',
+        playerId: this.playerId,
+        settlementId: s.id,
+        focus: want,
+      });
+    }
+  }
+
   private getMainBuilding(entities: Entity[]): Building | undefined {
     const faction = this.getFaction();
     if (!faction) return undefined;
@@ -396,14 +430,17 @@ export class AISystem {
     if (settlement.tier === 'camp' || settlement.tier === 'hamlet') return;
     if (this.getGold() < OUTPOST_TREASURY_COST) return;
 
+    // Prefer Outpost before City2 when treasury ok mid-game.
+    const cityCount = this.settlements?.allForOwner(this.playerId).length ?? 1;
+    if (cityCount >= 2 && settlement.outpostCount >= 1 && this.elapsed < 400) return;
+
     const military = this.getMilitary(entities);
     if (military.length < 2) return;
     const scout = military[military.length - 1]!;
     const ang = (this.elapsed * 0.07) % (Math.PI * 2);
-    const dist = 200 + (settlement.outpostCount * 40);
+    const dist = 180 + settlement.outpostCount * 40;
     const x = scout.x + Math.cos(ang) * 40;
     const y = scout.y + Math.sin(ang) * 40;
-    // Prefer site near scout toward map edge from main
     const ox = main.x + Math.cos(ang) * dist;
     const oy = main.y + Math.sin(ang) * dist;
     const site = canPlaceBuildingAt(ox, oy, gameMap, entities, 32)
@@ -412,7 +449,7 @@ export class AISystem {
         ? { x, y }
         : null;
     if (!site) return;
-    if (Math.hypot(site.x - main.x, site.y - main.y) < 160) return;
+    if (Math.hypot(site.x - main.x, site.y - main.y) < 120) return;
 
     this.enqueue({
       type: 'establishOutpost',
@@ -604,8 +641,19 @@ export class AISystem {
     const maxSeats = d.expansionPressure > 1.1 ? 3 : 2;
     if (owned.length >= maxSeats) return;
 
+    // Prefer Outpost before second city when treasury can afford it mid-game.
     const primary = this.settlements.get(this.playerId);
     if (!primary?.hasTownCenter) return;
+    if (
+      owned.length < 2 &&
+      primary.outpostCount < 1 &&
+      this.getGold() >= OUTPOST_TREASURY_COST &&
+      this.elapsed > 90 &&
+      this.elapsed < 420
+    ) {
+      return;
+    }
+
     if (!this.settlements.canFormSettlerGroup(this.playerId, player.factionId, this.match ?? undefined)) return;
 
     const site = this.pickExpansionSite(

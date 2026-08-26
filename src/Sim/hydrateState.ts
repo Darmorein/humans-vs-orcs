@@ -60,6 +60,16 @@ export function hydrateFromSnapshot(snap: GameStateSnapshot, target: HydrateTarg
     if (Array.isArray(p.taxContributions)) {
       player.taxContributions = p.taxContributions.map((c) => ({ ...c }));
     }
+    if (p.capitalSettlementId !== undefined) {
+      player.capitalSettlementId = p.capitalSettlementId;
+    }
+  }
+
+  if (typeof snap.matchElapsedSec === 'number') {
+    target.match.matchElapsedSec = snap.matchElapsedSec;
+  }
+  if (typeof snap.dominancePhase === 'boolean') {
+    target.match.dominancePhase = snap.dominancePhase;
   }
 
   target.rng.setState(snap.rngState);

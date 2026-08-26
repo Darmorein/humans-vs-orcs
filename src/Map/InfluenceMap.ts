@@ -8,6 +8,7 @@ import type { Entity } from '../Entities/Entity';
 import { Building, isOutpostBuilding } from '../Entities/Building';
 import { Unit } from '../Entities/Unit';
 import { isCombatUnitType } from '../Combat/Squad';
+import { CAPITAL_INFLUENCE_STRENGTH_MUL } from '../Match/MatchPacing';
 
 /** Control of one influence cell — no province IDs. */
 export type TerritoryControl = 'none' | 'contested' | FactionId;
@@ -235,14 +236,21 @@ export class InfluenceMap {
 
       const prestige = s.influence;
       const d = doctrineOf(player.factionId);
-      const strength =
+      const isCapital = player.capitalSettlementId === s.id;
+      let strength =
         s.population * 2.8 +
         s.prosperity * 50 +
         s.safety * 42 +
         infrastructure * 3.5 * d.craftProsperityBias +
         prestige * 55 +
         s.militaryTradition * 28 * d.influenceMilitaryWeight;
-      const range = 220 + strength * 2.2 + s.expansionRadius * 0.35 * d.expansionPressure;
+      // Population scale: denser cities radiate farther soft control.
+      strength *= 0.85 + Math.min(0.45, s.population / 80);
+      if (isCapital) strength *= CAPITAL_INFLUENCE_STRENGTH_MUL;
+      // Soft dominance: city control weighs a bit more in contested scoring.
+      if (match.dominancePhase) strength *= 1.12;
+      let range = 220 + strength * 2.2 + s.expansionRadius * 0.35 * d.expansionPressure;
+      if (isCapital) range *= 1.08;
       if (strength < 4) continue;
       out.push({
         x: s.centerX,

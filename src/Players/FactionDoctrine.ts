@@ -65,8 +65,9 @@ export const FACTION_DOCTRINES: Record<FactionId, FactionDoctrine> = {
     builderBias: 1.35,
     soldierBias: 0.85,
     farmerBias: 1.1,
-    settlerMinPop: 14,
-    settlerGoldCost: 110,
+    // Raised so second city lands ~5–7 min (Outpost first). See MatchPacing.
+    settlerMinPop: 20,
+    settlerGoldCost: 165,
     settlerWoodCost: 50,
     settlerCitizens: 5,
     settlerWorkers: 3,
@@ -98,8 +99,9 @@ export const FACTION_DOCTRINES: Record<FactionId, FactionDoctrine> = {
     builderBias: 0.9,
     soldierBias: 1.55,
     farmerBias: 0.95,
-    settlerMinPop: 10,
-    settlerGoldCost: 80,
+    // Still earlier than humans, but not free from living start.
+    settlerMinPop: 16,
+    settlerGoldCost: 120,
     settlerWoodCost: 30,
     settlerCitizens: 4,
     settlerWorkers: 2,

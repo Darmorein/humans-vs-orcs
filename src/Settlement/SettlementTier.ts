@@ -80,14 +80,15 @@ export const TIER_DEFS: Record<SettlementTier, SettlementTierDef> = {
     housingBonus: 4,
     capacityMult: 1,
     migrationBonus: 0.05,
-    canSendSettlers: true,
+    /** Second city delayed — settlers require Town+. Outpost remains at Village. */
+    canSendSettlers: false,
     allowedBuildings: VILLAGE_BUILDINGS,
   },
   town: {
     id: 'town',
     label: 'Town',
-    minPopulation: 22,
-    minStructures: 5,
+    minPopulation: 20,
+    minStructures: 4,
     housingBonus: 8,
     capacityMult: 1.15,
     migrationBonus: 0.1,

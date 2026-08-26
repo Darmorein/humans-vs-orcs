@@ -46,7 +46,7 @@ export interface GameStateSnapshot {
   rngState: number;
   idAllocators: IdAllocatorState;
   localPlayerId: string;
-  players: Array<{
+    players: Array<{
     id: string;
     factionId: string;
     controllerType: string;
@@ -60,7 +60,12 @@ export interface GameStateSnapshot {
     lastTaxChangeTick?: number;
     treasuryIncomeRate?: number;
     taxContributions?: Array<{ settlementId: string; label: string; amount: number }>;
+    capitalSettlementId?: string | null;
   }>;
+  /** Match soft-dominance clock (optional for older saves). */
+  matchElapsedSec?: number;
+  dominancePhase?: boolean;
+  pacingDiagnostics?: import('../Match/MatchPacing').MatchPacingDiagSnapshot;
   entities: Array<{
     id: number;
     kind: 'unit' | 'building' | 'resource' | 'other';
@@ -172,6 +177,7 @@ export function serializeGameState(args: {
   artifacts?: ArtifactSystem;
   history?: WorldHistory;
   softState?: SoftSimState;
+  pacingDiagnostics?: import('../Match/MatchPacing').MatchPacingDiagSnapshot;
 }): GameStateSnapshot {
   return {
     version: GAME_STATE_VERSION,
@@ -180,6 +186,9 @@ export function serializeGameState(args: {
     rngState: args.rng.getState(),
     idAllocators: captureIdAllocators(),
     localPlayerId: args.match.localPlayerId,
+    matchElapsedSec: args.match.matchElapsedSec,
+    dominancePhase: args.match.dominancePhase,
+    pacingDiagnostics: args.pacingDiagnostics,
     players: args.match.allPlayers().map((p) => ({
       id: p.id,
       factionId: p.factionId,
@@ -194,6 +203,7 @@ export function serializeGameState(args: {
       lastTaxChangeTick: p.lastTaxChangeTick,
       treasuryIncomeRate: p.treasuryIncomeRate,
       taxContributions: p.taxContributions.map((c) => ({ ...c })),
+      capitalSettlementId: p.capitalSettlementId,
     })),
     entities: args.entities.filter((e) => !e.isDead).map((e) => serializeEntity(e)),
     settlements: args.settlements.all().map((s) => ({

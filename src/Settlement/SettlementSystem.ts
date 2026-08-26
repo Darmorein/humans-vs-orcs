@@ -56,24 +56,31 @@ import type { TaxContribution } from '../Players/MatchState';
 import { TAX_POLICY_DEFS, type TaxPolicyDef } from '../Players/TaxPolicy';
 import type { GameRng } from '../Sim/GameRng';
 import type { Citizen } from './Population/Types';
+import { CITY_PACING } from '../Match/MatchPacing';
 
 const WOOD_PASSIVE = 0.25;
 const STONE_PASSIVE = 0.1;
 /** Base gold extraction per second at infra 0 / full safety / owned. */
-const GOLD_BASE_EXTRACTION = 2.2;
+const GOLD_BASE_EXTRACTION = CITY_PACING.goldBaseExtraction;
 const FOOD_PER_FARM = 1.15;
 /** Matches PopulationSim food use — used for tax food-reserve target. */
 const FOOD_PER_CITIZEN = 0.45;
 const LINK_MINE_RANGE = 520;
 const RAID_RANGE = 90;
-const OUTPOST_COST = { gold: 60, wood: 25, stone: 40, iron: 5 };
+/** Pre-scale outpost recipe — treasury cost eased so Outpost precedes City2. */
+const OUTPOST_COST = {
+  gold: Math.round(60 * CITY_PACING.outpostCostScale),
+  wood: Math.round(25 * CITY_PACING.outpostCostScale),
+  stone: Math.round(40 * CITY_PACING.outpostCostScale),
+  iron: Math.max(1, Math.round(5 * CITY_PACING.outpostCostScale)),
+};
 /**
  * Treasury gold to establish an outpost.
  * Test A: establishOutpost spends only player.gold via match.trySpend(OUTPOST_TREASURY_COST);
  * settlement.gold must be unchanged after a successful establish.
  */
 export const OUTPOST_TREASURY_COST = treasuryGoldCost(OUTPOST_COST);
-const OUTPOST_MIN_DIST_FROM_TC = 160;
+const OUTPOST_MIN_DIST_FROM_TC = CITY_PACING.outpostMinDistFromTc;
 const OUTPOST_MAX_DIST_FROM_ARMY = 110;
 const OUTPOST_MIN_DIST_BETWEEN = 140;
 const MIN_LOCAL_GOLD_RESERVE = 40;
@@ -299,21 +306,41 @@ export class SettlementSystem {
     factionId: FactionId = 'humans',
     match?: MatchState,
   ): boolean {
+    return this.formSettlerGroupBlockReason(playerId, factionId, match) === null;
+  }
+
+  /**
+   * Why forming a settler caravan would fail, or null if allowed.
+   * Shared by UI (`showBuildFeedback`) and canFormSettlerGroup.
+   */
+  public formSettlerGroupBlockReason(
+    playerId: string,
+    factionId: FactionId = 'humans',
+    match?: MatchState,
+  ): string | null {
     const s = this.primaryFor(playerId);
     const d = doctrineOf(factionId);
-    if (!s || !s.hasTownCenter) return false;
-    if (!TIER_DEFS[s.tier].canSendSettlers) return false;
-    if (s.population < d.settlerMinPop) return false;
-    if (s.citizens.length < d.settlerCitizens + 3) return false;
-    if (this.getSettlerGroup(playerId)) return false;
+    if (!s || !s.hasTownCenter) return 'No town center';
+    if (!TIER_DEFS[s.tier].canSendSettlers) {
+      return `Needs ${TIER_DEFS.town.label}+ (now ${TIER_DEFS[s.tier].label})`;
+    }
+    if (s.population < d.settlerMinPop) {
+      return `Need ${d.settlerMinPop}+ citizens (have ${s.population})`;
+    }
+    if (s.citizens.length < d.settlerCitizens + 3) {
+      return `Need more citizens for caravan (${d.settlerCitizens}+ reserve)`;
+    }
+    if (this.getSettlerGroup(playerId)) return 'Caravan already formed';
     const player = match?.getPlayer(playerId);
     const treasuryNeed = this.settlerTreasuryCost(s, d.settlerGoldCost, d.settlerWoodCost);
     if (player) {
-      if (player.gold < treasuryNeed) return false;
+      if (player.gold < treasuryNeed) {
+        return `Need ${Math.ceil(treasuryNeed - player.gold)} Treasury gold`;
+      }
     } else if (s.gold < d.settlerGoldCost || s.wood < d.settlerWoodCost) {
-      return false;
+      return 'Not enough local gold/wood for caravan';
     }
-    return true;
+    return null;
   }
 
   /**
@@ -576,7 +603,7 @@ export class SettlementSystem {
     return owned[0];
   }
 
-  /** Bind main buildings to settlements; spawn seats for new TCs. */
+  /** Bind main buildings to settlements; spawn seats for new TCs; set capital once. */
   private reconcileMains(entities: Entity[], match: MatchState) {
     for (const player of match.allPlayers()) {
       if (player.isDefeated) continue;
@@ -590,13 +617,17 @@ export class SettlementSystem {
       );
 
       for (const main of mains) {
-        if (main.settlementId && this.settlements.has(main.settlementId)) continue;
+        if (main.settlementId && this.settlements.has(main.settlementId)) {
+          this.ensureCapital(player, main.settlementId);
+          continue;
+        }
         // Reuse unbound primary without TC, else create
         const unbound = this.allForOwner(player.id).find((s) => !s.hasTownCenter);
         if (unbound) {
           main.settlementId = unbound.id;
           unbound.centerX = main.x;
           unbound.centerY = main.y;
+          this.ensureCapital(player, unbound.id);
         } else if (this.allForOwner(player.id).length === 0) {
           const s = this.createSettlement(
             player.id,
@@ -606,10 +637,14 @@ export class SettlementSystem {
             player.factionId,
           );
           main.settlementId = s.id;
+          this.ensureCapital(player, s.id);
         } else {
           // Orphan main (shouldn't happen often) — attach to nearest
           const nearest = this.nearestSettlement(player.id, main.x, main.y);
-          if (nearest) main.settlementId = nearest.id;
+          if (nearest) {
+            main.settlementId = nearest.id;
+            this.ensureCapital(player, nearest.id);
+          }
         }
       }
     }
@@ -622,6 +657,13 @@ export class SettlementSystem {
       }
       // keep freshly created unbound briefly — only delete if never had center
       if (s.centerX === 0 && s.centerY === 0) continue;
+    }
+  }
+
+  /** First TC / spawn seat becomes the player's capital. */
+  private ensureCapital(player: PlayerState, settlementId: string) {
+    if (!player.capitalSettlementId) {
+      player.capitalSettlementId = settlementId;
     }
   }
 
@@ -1210,8 +1252,19 @@ export class SettlementSystem {
     if (hasFort && s.militaryTradition > 0.4) return 'fortress';
     if (hasTemple && s.faith > 0.55) return 'religious';
     if (hasMarket && s.prosperity > 0.5) return 'trade';
-    if (s.farmCount >= 3 && s.farmCount > s.houseCount) return 'farming';
-    if (s.iron > 80 && s.stone > 80) return 'mining';
+    // Mild ease: farming / mining signals earlier (CityPacing).
+    if (
+      s.farmCount >= CITY_PACING.farmingFarmThreshold &&
+      s.farmCount > s.houseCount * 0.5
+    ) {
+      return 'farming';
+    }
+    if (
+      s.iron > CITY_PACING.miningIronThreshold &&
+      s.stone > CITY_PACING.miningStoneThreshold
+    ) {
+      return 'mining';
+    }
     return 'none';
   }
 

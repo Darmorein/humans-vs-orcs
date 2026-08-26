@@ -4,7 +4,7 @@ import { Camera } from './Engine/Camera';
 import { InputManager } from './Engine/InputManager';
 import { GameMap } from './Map/GameMap';
 import { MapGenerator } from './Map/MapGenerator';
-import { footprintForBuildingType, placementBlockReason } from './Map/BuildPlacement';
+import { canPlaceBuildingAt, footprintForBuildingType, placementBlockReason } from './Map/BuildPlacement';
 import { Entity } from './Entities/Entity';
 import { Unit } from './Entities/Unit';
 import { Building, isMainBuilding } from './Entities/Building';
@@ -67,6 +67,14 @@ import {
 import { compareAiVsAiHashes, diffSnapshotHints } from './Sim/determinismTest';
 import { spawnUnitNearBuilding } from './Sim/spawnUnit';
 import { PVP_COMMAND_DELAY_TICKS, type PvpSession } from './Net';
+import {
+  CITY_PACING,
+  MATCH_DOMINANCE_RESOLVE_SEC,
+  MATCH_SOFT_CAP_SEC,
+  MatchPacingDiagnostics,
+  strategicDominanceScore,
+} from './Match/MatchPacing';
+import { isCombatUnitType } from './Combat/Squad';
 
 /** Boot options for skirmish or synchronized PvP 1v1. */
 export interface GameOptions {
@@ -128,6 +136,12 @@ export class Game {
   private buildFeedback: string | null = null;
   private buildFeedbackTimer = 0;
   private gameState: 'playing' | 'victory' | 'defeat' = 'playing';
+  private readonly pacingDiag = new MatchPacingDiagnostics();
+  private readonly debugPacing =
+    typeof location !== 'undefined' &&
+    new URLSearchParams(location.search).get('debug') === '1';
+  /** Per-seat peak city count for second-city timing. */
+  private readonly seatCityPeaks = new Map<string, number>();
 
   private pvpSession: PvpSession | null = null;
   private pvpUnsubs: Array<() => void> = [];
@@ -409,6 +423,7 @@ export class Game {
       artifacts: this.artifactSystem,
       history: this.worldHistory,
       softState: this.captureSoftSimState(),
+      pacingDiagnostics: this.pacingDiag.capture(),
     });
   }
 
@@ -519,6 +534,7 @@ export class Game {
     if (save.snapshot.softState) {
       this.influenceMap.setAccum(save.snapshot.softState.influenceAccum);
     }
+    this.pacingDiag.restore(save.snapshot.pacingDiagnostics);
     this.fog.update(this.entities, this.gameMap, this.match.localPlayerId, this.influenceMap);
     console.info(
       `[Load] tick=${this.simTick} entities=${this.entities.length} cmdsLogged=${save.replay.commands.length}`,
@@ -563,11 +579,17 @@ export class Game {
     const local = this.match.localPlayer;
     const group = this.settlementSystem.getSettlerGroup(local.id);
     if (!group && !this.settlementSystem.canFormSettlerGroup(local.id, local.factionId, this.match)) {
-      this.showBuildFeedback('Cannot found settlement — need Village+, citizens, and caravan costs');
+      const why =
+        this.settlementSystem.formSettlerGroupBlockReason(
+          local.id,
+          local.factionId,
+          this.match,
+        ) ?? 'Cannot found city';
+      this.showBuildFeedback(why);
       return;
     }
     this.placementMode = 'foundSettlement';
-    this.showBuildFeedback('Found Settlement — click valid land');
+    this.showBuildFeedback('Found City — click valid land');
   }
 
   public startEstablishOutpostPlacement() {
@@ -584,7 +606,17 @@ export class Game {
 
   public formSettlerGroup(): boolean {
     if (this.gameState !== 'playing') return false;
-    if (!this.canFormSettlerGroup()) return false;
+    if (!this.canFormSettlerGroup()) {
+      const local = this.match.localPlayer;
+      const why =
+        this.settlementSystem.formSettlerGroupBlockReason(
+          local.id,
+          local.factionId,
+          this.match,
+        ) ?? 'Cannot form caravan';
+      this.showBuildFeedback(why);
+      return false;
+    }
     this.submitCommand({
       type: 'formSettlerGroup',
       playerId: this.match.localPlayerId,
@@ -595,6 +627,15 @@ export class Game {
   public canFormSettlerGroup(): boolean {
     const local = this.match.localPlayer;
     return this.settlementSystem.canFormSettlerGroup(local.id, local.factionId, this.match);
+  }
+
+  public formSettlerGroupBlockReason(): string | null {
+    const local = this.match.localPlayer;
+    return this.settlementSystem.formSettlerGroupBlockReason(
+      local.id,
+      local.factionId,
+      this.match,
+    );
   }
 
   public hasReadySettlerGroup(): boolean {
@@ -688,7 +729,7 @@ export class Game {
       this.entities.push(new Building(base.x, base.y, faction.mainBuilding, player));
 
       // Living start: seed civic population after reconcile; small scout squad for pacing.
-      const scoutCount = player.controllerType === 'AI' ? 2 : 2;
+      const scoutCount = 2;
       for (let i = 0; i < scoutCount; i++) {
         const type = i === 0 ? faction.meleeType : faction.rangedType;
         spawnUnitNearBuilding({
@@ -719,13 +760,21 @@ export class Game {
     for (const player of this.match.allPlayers()) {
       const s = this.settlementSystem.get(player.id);
       if (!s) continue;
-      const seed = player.controllerType === 'AI' ? 34 : 28;
+      const seed =
+        player.controllerType === 'AI' ? CITY_PACING.aiStartPop : CITY_PACING.localStartPop;
       while (s.citizens.length < seed) {
         const i = s.citizens.length;
         s.citizens.push({
           id: `c-start-${player.id}-${i}`,
           age: 18 + (i * 5) % 25,
-          profession: i % 5 === 0 ? 'builder' : i % 3 === 0 ? 'farmer' : i % 7 === 0 ? 'miner' : 'peasant',
+          profession:
+            i % 5 === 0
+              ? 'builder'
+              : i % 3 === 0
+                ? 'farmer'
+                : i % 7 === 0
+                  ? 'miner'
+                  : 'peasant',
           settlementId: s.id,
           health: 0.9,
           experience: 5,
@@ -735,13 +784,65 @@ export class Game {
         });
       }
       s.population = s.citizens.length;
-      s.food = Math.max(s.food, 55);
-      s.wood = Math.max(s.wood, 120);
-      s.stone = Math.max(s.stone, 70);
+      s.food = Math.max(s.food, CITY_PACING.startFood);
+      s.wood = Math.max(s.wood, 140);
+      s.stone = Math.max(s.stone, 85);
       // Faction Treasury stays on player.gold (200–350 from match setup).
       player.gold = Math.max(player.gold, 200);
-      // Local settlement gold is independent — seed ~80–120, do not mirror treasury.
-      s.gold = 80 + Math.floor(this.simRng.range(0, 41));
+      // Local settlement gold is independent — seed ~100, do not mirror treasury.
+      s.gold = CITY_PACING.startLocalGold + Math.floor(this.simRng.range(0, 21));
+
+      if (!player.capitalSettlementId) {
+        player.capitalSettlementId = s.id;
+      }
+
+      this.seedStartingStructures(player, s.id);
+    }
+
+    // Reconcile counts after seeded houses/farm so housing/tier reflect living start.
+    this.settlementSystem.update(
+      0,
+      this.entities,
+      this.match,
+      this.gameMap,
+      this.simRng,
+      this.influenceMap,
+    );
+  }
+
+  /** Seed 2 Houses + 1 Farm (constructed) near the capital TC. */
+  private seedStartingStructures(player: PlayerState, settlementId: string) {
+    const base = this.baseForPlayer(player);
+    const farmType = player.factionId === 'orcs' ? 'PigFarm' : 'Farm';
+    const offsets: Array<{ x: number; y: number; type: BuildingType }> = [
+      { x: 72, y: 28, type: 'House' },
+      { x: -68, y: 36, type: 'House' },
+      { x: 24, y: 78, type: farmType },
+    ];
+    for (const o of offsets) {
+      const x = base.x + o.x;
+      const y = base.y + o.y;
+      const foot = footprintForBuildingType(o.type, player.factionId);
+      if (!canPlaceBuildingAt(x, y, this.gameMap, this.entities, foot)) {
+        // Fallback ring search
+        let placed = false;
+        for (let a = 0; a < 8 && !placed; a++) {
+          const ang = (a / 8) * Math.PI * 2;
+          const fx = base.x + Math.cos(ang) * 90;
+          const fy = base.y + Math.sin(ang) * 70;
+          if (canPlaceBuildingAt(fx, fy, this.gameMap, this.entities, foot)) {
+            const b = new Building(fx, fy, o.type, player, true);
+            b.settlementId = settlementId;
+            this.entities.push(b);
+            placed = true;
+          }
+        }
+        if (!placed) continue;
+      } else {
+        const b = new Building(x, y, o.type, player, true);
+        b.settlementId = settlementId;
+        this.entities.push(b);
+      }
     }
   }
 
@@ -894,9 +995,25 @@ export class Game {
       influence: this.influenceMap,
       simTick: this.simTick,
     };
+    const elapsed = this.match.matchElapsedSec;
     for (const cmd of batch) {
-      applyCommand(cmd, world);
+      const ok = applyCommand(cmd, world);
       this.replayRecorder.recordApplied(this.simTick, cmd);
+      if (!ok) continue;
+      if (
+        cmd.type === 'moveSquad' ||
+        cmd.type === 'moveAgents' ||
+        cmd.type === 'attack' ||
+        cmd.type === 'trainUnit'
+      ) {
+        this.pacingDiag.noteArmyCommand(elapsed);
+      }
+      if (cmd.type === 'establishOutpost') {
+        this.pacingDiag.noteOutpost(elapsed);
+      }
+      if (cmd.type === 'foundSettlement') {
+        // Second city counted after founding resolves in updatePacingPeaks.
+      }
     }
   }
 
@@ -927,7 +1044,7 @@ export class Game {
             formGroupIfNeeded: true,
           });
           this.placementMode = null;
-          this.showBuildFeedback('Settlement expedition ordered');
+          this.showBuildFeedback('City expedition ordered');
         } else {
           this.showBuildFeedback(`Cannot found here: ${reason}`);
         }
@@ -1044,7 +1161,15 @@ export class Game {
         entity.ownerPlayerId &&
         isMainBuilding(entity.buildingType)
       ) {
-        aliveMains.add(entity.ownerPlayerId);
+        const owner = this.match.getPlayer(entity.ownerPlayerId);
+        if (!owner) continue;
+        // Capital victory: designated capital TC counts; fallback any main if unset.
+        if (
+          !owner.capitalSettlementId ||
+          entity.settlementId === owner.capitalSettlementId
+        ) {
+          aliveMains.add(entity.ownerPlayerId);
+        }
       }
     }
 
@@ -1084,8 +1209,14 @@ export class Game {
       y: this.gameMap.height * 0.5,
     });
 
+    this.updateMatchPacing(dt);
+    this.observeCombatPacing();
+
     applyCapitalDefeatFlags(this.match.allPlayers(), aliveMains);
-    const outcome = resolveLocalMatchOutcome(local, this.match.opponentsOf(local.id));
+    let outcome = resolveLocalMatchOutcome(local, this.match.opponentsOf(local.id));
+    if (outcome === 'playing') {
+      outcome = this.maybeSoftDominanceResolve();
+    }
     if (outcome !== 'playing') this.gameState = outcome;
 
     this.resolveUnitCollisions();
@@ -1258,7 +1389,7 @@ export class Game {
         ctx.font = '12px Segoe UI, sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText(
-          valid ? 'Found Settlement Here' : `Cannot found: ${block}`,
+          valid ? 'Found City Here' : `Cannot found: ${block}`,
           screenPos.x,
           screenPos.y - 36,
         );
@@ -1383,12 +1514,17 @@ export class Game {
           ? `${opp.displayName}: ${aiPhase}${aiReason ? ` (${aiReason})` : ''}`
           : '';
       const seats = this.settlementSystem.allForOwner(local.id).length;
+      const cap =
+        local.capitalSettlementId &&
+        this.settlementSystem.getById(local.capitalSettlementId)
+          ? 'Capital'
+          : TIER_DEFS[settlement.tier].label;
       ctx.fillText(
         `Citizens ${settlement.population}/${settlement.housing}  ` +
-          `${TIER_DEFS[settlement.tier].label}  Safety ${Math.round(settlement.safety * 100)}%` +
+          `${cap} · ${TIER_DEFS[settlement.tier].label}  Safety ${Math.round(settlement.safety * 100)}%` +
           (need ? `  → ${need}` : '') +
           `  Outposts ${settlement.outpostCount}` +
-          `  seats:${seats}` +
+          `  Cities:${seats}` +
           (phaseBit ? `   ${phaseBit}` : ''),
         320,
         38,
@@ -1443,6 +1579,142 @@ export class Game {
       ctx.textAlign = 'center';
       ctx.fillText(msg, this.renderer.canvas.width / 2, y + 19);
     }
+
+    // Pacing diagnostics (always muted corner; richer with ?debug=1)
+    ctx.textAlign = 'left';
+    ctx.font = this.debugPacing ? '11px Segoe UI, sans-serif' : '10px Segoe UI, sans-serif';
+    ctx.fillStyle = this.debugPacing
+      ? 'rgba(200, 220, 180, 0.85)'
+      : 'rgba(180, 190, 160, 0.45)';
+    const paceY = this.renderer.canvas.height - (this.influenceMap.overlayVisible ? 36 : 14);
+    ctx.fillText(this.pacingDiag.formatLine(), 14, paceY);
+    if (this.match.dominancePhase) {
+      ctx.fillStyle = 'rgba(255, 180, 80, 0.7)';
+      ctx.fillText('Dominance phase', 14, paceY - 14);
+    }
+  }
+
+  /** Center camera on an owned city seat. */
+  public centerOnSettlement(settlementId: string): boolean {
+    const s = this.settlementSystem.getById(settlementId);
+    if (!s) return false;
+    this.camera.centerOn(s.centerX, s.centerY);
+    return true;
+  }
+
+  /** Compact cities list for HUD / overview panel. */
+  public getOwnedCitiesOverview(): Array<{
+    id: string;
+    shortId: string;
+    tier: string;
+    focus: string;
+    pop: number;
+    underPressure: boolean;
+    isCapital: boolean;
+  }> {
+    const local = this.match.localPlayer;
+    return this.settlementSystem.allForOwner(local.id).map((s) => ({
+      id: s.id,
+      shortId: s.id.replace(/^s-/, '').slice(-8),
+      tier: TIER_DEFS[s.tier].label,
+      focus: s.focus,
+      pop: s.population,
+      underPressure: s.threatPressure > 0.35 || s.warShock > 0.2,
+      isCapital: local.capitalSettlementId === s.id,
+    }));
+  }
+
+  public getMatch(): MatchState {
+    return this.match;
+  }
+
+  public getPacingDiagnostics(): MatchPacingDiagnostics {
+    return this.pacingDiag;
+  }
+
+  private updateMatchPacing(dt: number) {
+    this.match.matchElapsedSec += dt;
+    if (this.match.matchElapsedSec >= MATCH_SOFT_CAP_SEC) {
+      this.match.dominancePhase = true;
+    }
+
+    let totalCities = 0;
+    for (const p of this.match.allPlayers()) {
+      const n = this.settlementSystem.allForOwner(p.id).filter((s) => s.hasTownCenter).length;
+      totalCities += n;
+      const prev = this.seatCityPeaks.get(p.id) ?? 0;
+      if (n >= 2 && prev < 2) {
+        this.pacingDiag.noteSecondCity(this.match.matchElapsedSec);
+      }
+      this.seatCityPeaks.set(p.id, Math.max(prev, n));
+    }
+    this.pacingDiag.tick(
+      this.match.matchElapsedSec,
+      totalCities,
+      this.squadSystem.all().length,
+    );
+  }
+
+  private observeCombatPacing() {
+    const elapsed = this.match.matchElapsedSec;
+    const combat = this.entities.filter(
+      (e): e is Unit => e instanceof Unit && !e.isDead && isCombatUnitType(e.unitType),
+    );
+    for (let i = 0; i < combat.length; i++) {
+      const a = combat[i]!;
+      for (let j = i + 1; j < combat.length; j++) {
+        const b = combat[j]!;
+        if (a.ownerPlayerId === b.ownerPlayerId) continue;
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (d < 220) this.pacingDiag.noteContact(elapsed);
+        if (d < 90 || a.targetEntity === b || b.targetEntity === a) {
+          this.pacingDiag.noteBattle(elapsed);
+        }
+      }
+    }
+    for (const e of this.entities) {
+      if (!(e instanceof Unit) || !e.isDead) continue;
+      if (!isCombatUnitType(e.unitType)) continue;
+      this.pacingDiag.noteBattle(elapsed);
+    }
+  }
+
+  /**
+   * Soft resolve after soft-cap + 90s — optional score win.
+   * Capital destroy remains primary; this only fires if still playing.
+   */
+  private maybeSoftDominanceResolve(): 'playing' | 'victory' | 'defeat' {
+    if (!this.match.dominancePhase) return 'playing';
+    if (this.match.matchElapsedSec < MATCH_SOFT_CAP_SEC + MATCH_DOMINANCE_RESOLVE_SEC) {
+      return 'playing';
+    }
+    const scores = this.match.allPlayers().map((p) => {
+      const cities = this.settlementSystem.allForOwner(p.id).filter((s) => s.hasTownCenter)
+        .length;
+      const territory = this.influenceMap.estimateControlShares(p.factionId).ownShare;
+      const army = this.entities.filter(
+        (e) =>
+          e instanceof Unit &&
+          !e.isDead &&
+          e.ownerPlayerId === p.id &&
+          isCombatUnitType(e.unitType),
+      ).length;
+      return {
+        player: p,
+        score: strategicDominanceScore({ cityCount: cities, territoryShare: territory, armyCount: army }),
+      };
+    });
+    scores.sort((a, b) => b.score - a.score);
+    const best = scores[0];
+    const second = scores[1];
+    if (!best || (second && best.score - second.score < 8)) return 'playing';
+    for (const row of scores) {
+      if (row.player.id !== best.player.id) row.player.isDefeated = true;
+    }
+    return resolveLocalMatchOutcome(
+      this.match.localPlayer,
+      this.match.opponentsOf(this.match.localPlayerId),
+    );
   }
 
   /** Dev / UI access to local settlement simulation. */
