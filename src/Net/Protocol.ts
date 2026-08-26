@@ -25,6 +25,7 @@ export type ClientNetMessage =
   | { type: 'requestStart' }
   | { type: 'matchStart'; seed: number; factions: [FactionId, FactionId] }
   | { type: 'command'; command: GameCommand }
+  | { type: 'hashSync'; tick: number; hash: string }
   | { type: 'chat'; text: string };
 
 /** Messages the client receives from the relay or peer (via relay). */
@@ -35,6 +36,7 @@ export type ServerNetMessage =
   | { type: 'error'; message: string }
   | { type: 'matchStart'; seed: number; factions: [FactionId, FactionId] }
   | { type: 'command'; command: GameCommand }
+  | { type: 'hashSync'; tick: number; hash: string }
   | { type: 'chat'; text: string; fromSeat: SeatIndex };
 
 export function modeLabel(a: FactionId, b: FactionId): string {

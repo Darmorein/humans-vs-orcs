@@ -1,5 +1,5 @@
 /**
- * Multiplayer-ready simulation core (no networking yet).
+ * Multiplayer-ready simulation core.
  * Fixed tick, seeded RNG, command queue, serializable snapshots,
  * save/load + replay foundation (seed + TimedCommand[]).
  */
@@ -12,6 +12,9 @@ export type {
   ChangeFormationCommand,
   QueueBuildingCommand,
   FoundSettlementCommand,
+  EquipArtifactCommand,
+  UnequipArtifactCommand,
+  TransferArtifactCommand,
 } from './Commands';
 export { isGameCommand } from './Commands';
 export { CommandQueue } from './CommandQueue';
@@ -40,3 +43,9 @@ export {
   type SaveGame,
 } from './SaveGame';
 export { hydrateFromSnapshot } from './hydrateState';
+export { hashGameSnapshot, hashString, type SimulationStateHash } from './stateHash';
+export { compareSaveLoadHashes, type DeterminismTestResult } from './determinismTest';
+export { mountSimDiagnostics, type SimDiagnosticsData } from './diagnostics';
+export { getUnitDef, unitSpawnOptions, allUnitDefs } from './UnitCatalog';
+export { spawnUnitRegistered, spawnUnitNearBuilding } from './spawnUnit';
+export { captureIdAllocators, restoreIdAllocators, type IdAllocatorState } from './IdAllocators';

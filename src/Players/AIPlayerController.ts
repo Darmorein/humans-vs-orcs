@@ -20,6 +20,8 @@ export class AIPlayerController implements PlayerController {
       ctx.settlements,
       ctx.squads,
       ctx.influence,
+      ctx.submitCommand,
+      ctx.rng,
     );
   }
 

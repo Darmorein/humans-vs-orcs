@@ -6,8 +6,12 @@ import type { MatchState } from '../Players/MatchState';
 import type { SettlementSystem } from '../Settlement/SettlementSystem';
 import type { SquadSystem } from '../Combat/SquadSystem';
 import { isCombatUnitType } from '../Combat/Squad';
+import type { HeroSystem } from '../Heroes/HeroSystem';
+import type { ArtifactSystem } from '../Artifacts/ArtifactSystem';
+import type { WorldHistory } from '../WorldHistory/WorldHistory';
 import type { GameRng } from './GameRng';
 import type { GameStateSnapshot } from './serializeState';
+import { restoreIdAllocators } from './IdAllocators';
 
 export interface HydrateTarget {
   entities: Entity[];
@@ -23,11 +27,14 @@ export interface HydrateTarget {
     damage: number;
     range: number;
   };
+  heroes?: HeroSystem;
+  artifacts?: ArtifactSystem;
+  history?: WorldHistory;
 }
 
 /**
  * Best-effort restore from GameStateSnapshot.
- * Enough for Save/Load; not a claim of bit-identical replay.
+ * Mid-game fidelity: entities, settlements (citizens/queue), squads, heroes, artifacts, history.
  */
 export function hydrateFromSnapshot(snap: GameStateSnapshot, target: HydrateTarget): void {
   for (const p of snap.players) {
@@ -48,12 +55,16 @@ export function hydrateFromSnapshot(snap: GameStateSnapshot, target: HydrateTarg
   target.entities.length = 0;
   target.squads.clearAll();
 
+  const hasSquadSnap = Array.isArray(snap.squads);
+
   for (const e of snap.entities) {
     if (e.kind === 'resource') {
-      const node = new ResourceNode(e.x, e.y, 5000);
+      const amount = e.resourceAmount ?? 5000;
+      const node = new ResourceNode(e.x, e.y, amount);
       node.assignId(e.id);
       node.hp = e.hp;
       node.maxHp = e.maxHp;
+      node.resourceAmount = amount;
       target.entities.push(node);
       continue;
     }
@@ -71,6 +82,15 @@ export function hydrateFromSnapshot(snap: GameStateSnapshot, target: HydrateTarg
       b.assignId(e.id);
       b.hp = e.hp;
       b.maxHp = e.maxHp;
+      if (typeof e.maxConstructionProgress === 'number') {
+        b.maxConstructionProgress = e.maxConstructionProgress;
+      }
+      if (typeof e.constructionProgress === 'number') {
+        b.constructionProgress = e.constructionProgress;
+      }
+      if (e.settlementId !== undefined) {
+        b.settlementId = e.settlementId;
+      }
       target.entities.push(b);
       continue;
     }
@@ -85,12 +105,42 @@ export function hydrateFromSnapshot(snap: GameStateSnapshot, target: HydrateTarg
       u.maxHp = e.maxHp;
       u.heroId = e.heroId ?? null;
       u.artifactId = e.artifactId ?? null;
-      if (e.heroId) u.isHero = true;
+      u.personalXp = e.personalXp ?? 0;
+      u.prestige = e.prestige ?? 0;
+      u.killCount = e.killCount ?? 0;
+      u.isHero = e.isHero ?? !!e.heroId;
+      u.heroName = e.heroName ?? null;
+      if (hasSquadSnap) {
+        u.squadId = e.squadId ?? null;
+      }
       target.entities.push(u);
-      if (isCombatUnitType(u.unitType)) target.squads.registerUnit(u);
+      if (!hasSquadSnap && isCombatUnitType(u.unitType)) {
+        target.squads.registerUnit(u);
+      }
     }
   }
 
-  Entity.resetIdCounter(maxId + 1);
   target.settlements.hydrateFromSnapshot(snap.settlements, target.match);
+
+  if (hasSquadSnap && snap.squads) {
+    target.squads.hydrateFromSnapshot(snap.squads);
+  }
+
+  if (target.heroes && snap.heroes) {
+    target.heroes.replaceAll(snap.heroes);
+  }
+
+  if (target.artifacts && snap.artifacts) {
+    target.artifacts.replaceAll(snap.artifacts);
+  }
+
+  if (target.history && snap.historyEvents) {
+    target.history.replaceEvents(snap.historyEvents);
+  }
+
+  if (snap.idAllocators) {
+    restoreIdAllocators(snap.idAllocators);
+  } else {
+    Entity.resetIdCounter(maxId + 1);
+  }
 }

@@ -20,6 +20,7 @@ export interface PvpMatchConfig {
 type LobbyListener = (seats: [LobbySeat, LobbySeat] | null, info: PvpSessionInfo) => void;
 type MatchListener = (cfg: PvpMatchConfig) => void;
 type CommandListener = (cmd: GameCommand) => void;
+type HashListener = (tick: number, hash: string) => void;
 
 export interface PvpSessionInfo {
   roomId: string | null;
@@ -47,6 +48,7 @@ export class PvpSession {
   private matchListeners = new Set<MatchListener>();
   private commandListeners = new Set<CommandListener>();
   private peerLeftListeners = new Set<() => void>();
+  private hashListeners = new Set<HashListener>();
 
   constructor(wsUrl?: string) {
     this.client = new NetClient(wsUrl);
@@ -84,6 +86,15 @@ export class PvpSession {
   public onPeerLeft(fn: () => void): () => void {
     this.peerLeftListeners.add(fn);
     return () => this.peerLeftListeners.delete(fn);
+  }
+
+  public onRemoteHash(fn: HashListener): () => void {
+    this.hashListeners.add(fn);
+    return () => this.hashListeners.delete(fn);
+  }
+
+  public sendHashSync(tick: number, hash: string) {
+    this.client.send({ type: 'hashSync', tick, hash });
   }
 
   public async connect(): Promise<void> {
@@ -185,6 +196,9 @@ export class PvpSession {
         break;
       case 'command':
         for (const fn of this.commandListeners) fn(msg.command);
+        break;
+      case 'hashSync':
+        for (const fn of this.hashListeners) fn(msg.tick, msg.hash);
         break;
       default:
         break;

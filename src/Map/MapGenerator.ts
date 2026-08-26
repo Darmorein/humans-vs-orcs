@@ -20,8 +20,10 @@ export interface GeneratedMap {
   height: number;
   tileSize: number;
   tiles: TerrainTile[];
-  humanBase: MapPoint;
-  orcBase: MapPoint;
+  /** Seat start slot A (SW-ish) — not faction. */
+  startA: MapPoint;
+  /** Seat start slot B (NE-ish) — not faction. */
+  startB: MapPoint;
   goldDeposits: MapPoint[];
   worldWidth: number;
   worldHeight: number;
@@ -32,14 +34,14 @@ export interface GeneratedMap {
 export interface MapValidationReport {
   ok: boolean;
   startsConnected: boolean;
-  humanReachable: boolean;
-  orcReachable: boolean;
-  humanHasGold: boolean;
-  orcHasGold: boolean;
-  humanSettlementOk: boolean;
-  orcSettlementOk: boolean;
-  humanNotEnclosed: boolean;
-  orcNotEnclosed: boolean;
+  startAReachable: boolean;
+  startBReachable: boolean;
+  startAHasGold: boolean;
+  startBHasGold: boolean;
+  startASettlementOk: boolean;
+  startBSettlementOk: boolean;
+  startANotEnclosed: boolean;
+  startBNotEnclosed: boolean;
   bridgeCount: number;
   repairs: string[];
 }
@@ -74,8 +76,10 @@ export class MapGenerator {
   private elevation: Float32Array;
   private moisture: Float32Array;
   private tiles: TerrainTile[];
-  private humanBase: TilePos = { tx: 12, ty: 12 };
-  private orcBase: TilePos = { tx: 12, ty: 12 };
+  /** Seat start slot A (SW region). */
+  private startA: TilePos = { tx: 12, ty: 12 };
+  /** Seat start slot B (NE region). */
+  private startB: TilePos = { tx: 12, ty: 12 };
   private goldDeposits: TilePos[] = [];
   private repairs: string[] = [];
 
@@ -103,10 +107,10 @@ export class MapGenerator {
       if (a.tiles[i]!.type !== b.tiles[i]!.type) return false;
     }
     return (
-      a.humanBase.x === b.humanBase.x &&
-      a.humanBase.y === b.humanBase.y &&
-      a.orcBase.x === b.orcBase.x &&
-      a.orcBase.y === b.orcBase.y
+      a.startA.x === b.startA.x &&
+      a.startA.y === b.startA.y &&
+      a.startB.x === b.startB.x &&
+      a.startB.y === b.startB.y
     );
   }
 
@@ -128,7 +132,7 @@ export class MapGenerator {
     this.placeResources();
     this.placeStrategicBridges();
     this.placeStartingAreas();
-    this.generateRoads(this.humanBase, this.orcBase, this.goldDeposits);
+    this.generateRoads(this.startA, this.startB, this.goldDeposits);
 
     // —— Analyze → Repair (loop) ——
     let report = this.analyze();
@@ -139,7 +143,7 @@ export class MapGenerator {
     }
 
     if (!report.ok) {
-      this.forceCorridor(this.humanBase, this.orcBase);
+      this.forceCorridor(this.startA, this.startB);
       this.repairs.push('force-corridor');
       report = this.analyze();
     }
@@ -156,8 +160,8 @@ export class MapGenerator {
       height: this.h,
       tileSize,
       tiles: this.tiles,
-      humanBase: this.tileToWorld(this.humanBase.tx, this.humanBase.ty),
-      orcBase: this.tileToWorld(this.orcBase.tx, this.orcBase.ty),
+      startA: this.tileToWorld(this.startA.tx, this.startA.ty),
+      startB: this.tileToWorld(this.startB.tx, this.startB.ty),
       goldDeposits: this.goldDeposits.map((g) => this.tileToWorld(g.tx, g.ty)),
       worldWidth: this.w * tileSize,
       worldHeight: this.h * tileSize,
@@ -549,63 +553,68 @@ export class MapGenerator {
   }
 
   private placeStartingAreas() {
-    let human = this.pickBaseSite(0.06, 0.4, 0.55, 0.94);
-    let orc = this.pickBaseSite(0.55, 0.94, 0.06, 0.42);
+    // Same SW / NE sites as before — labels are seat slots, not factions.
+    let startA = this.pickBaseSite(0.06, 0.4, 0.55, 0.94);
+    let startB = this.pickBaseSite(0.55, 0.94, 0.06, 0.42);
 
-    if (!human || !orc) {
+    if (!startA || !startB) {
       this.flattenFallbackBases();
-      human = this.pickBaseSite(0.08, 0.38, 0.58, 0.92) ?? { tx: 14, ty: this.h - 14 };
-      orc = this.pickBaseSite(0.58, 0.92, 0.08, 0.38) ?? { tx: this.w - 14, ty: 14 };
+      startA = this.pickBaseSite(0.08, 0.38, 0.58, 0.92) ?? { tx: 14, ty: this.h - 14 };
+      startB = this.pickBaseSite(0.58, 0.92, 0.08, 0.38) ?? { tx: this.w - 14, ty: 14 };
     }
 
-    this.humanBase = human;
-    this.orcBase = orc;
-    this.clearBaseArea(human.tx, human.ty);
-    this.clearBaseArea(orc.tx, orc.ty);
+    this.startA = startA;
+    this.startB = startB;
+    this.clearBaseArea(startA.tx, startA.ty);
+    this.clearBaseArea(startB.tx, startB.ty);
 
-    this.goldDeposits = this.placeGold(human, orc);
+    this.goldDeposits = this.placeGold(startA, startB);
   }
 
   // ─── Analyze ─────────────────────────────────────────────────────
 
   private analyze(): MapValidationReport {
-    const human = this.humanBase;
-    const orc = this.orcBase;
+    const startA = this.startA;
+    const startB = this.startB;
     const bridgeCount = this.countBridges();
 
-    const startsConnected = this.canPath(human.tx, human.ty, orc.tx, orc.ty);
-    const humanReachable = this.tiles[this.idx(human.tx, human.ty)]?.walkable === true;
-    const orcReachable = this.tiles[this.idx(orc.tx, orc.ty)]?.walkable === true;
-    const humanHasGold = this.goldDeposits.some((g) => this.canPath(human.tx, human.ty, g.tx, g.ty));
-    const orcHasGold = this.goldDeposits.some((g) => this.canPath(orc.tx, orc.ty, g.tx, g.ty));
-    const humanSettlementOk = this.scoreBaseSite(human.tx, human.ty) >= 0;
-    const orcSettlementOk = this.scoreBaseSite(orc.tx, orc.ty) >= 0;
-    const humanNotEnclosed = this.hasEscapeRoute(human.tx, human.ty);
-    const orcNotEnclosed = this.hasEscapeRoute(orc.tx, orc.ty);
+    const startsConnected = this.canPath(startA.tx, startA.ty, startB.tx, startB.ty);
+    const startAReachable = this.tiles[this.idx(startA.tx, startA.ty)]?.walkable === true;
+    const startBReachable = this.tiles[this.idx(startB.tx, startB.ty)]?.walkable === true;
+    const startAHasGold = this.goldDeposits.some((g) =>
+      this.canPath(startA.tx, startA.ty, g.tx, g.ty),
+    );
+    const startBHasGold = this.goldDeposits.some((g) =>
+      this.canPath(startB.tx, startB.ty, g.tx, g.ty),
+    );
+    const startASettlementOk = this.scoreBaseSite(startA.tx, startA.ty) >= 0;
+    const startBSettlementOk = this.scoreBaseSite(startB.tx, startB.ty) >= 0;
+    const startANotEnclosed = this.hasEscapeRoute(startA.tx, startA.ty);
+    const startBNotEnclosed = this.hasEscapeRoute(startB.tx, startB.ty);
 
     const ok =
       startsConnected &&
-      humanReachable &&
-      orcReachable &&
-      humanHasGold &&
-      orcHasGold &&
-      humanSettlementOk &&
-      orcSettlementOk &&
-      humanNotEnclosed &&
-      orcNotEnclosed &&
+      startAReachable &&
+      startBReachable &&
+      startAHasGold &&
+      startBHasGold &&
+      startASettlementOk &&
+      startBSettlementOk &&
+      startANotEnclosed &&
+      startBNotEnclosed &&
       bridgeCount >= MAP_CONFIG.bridgeCountMin;
 
     return {
       ok,
       startsConnected,
-      humanReachable,
-      orcReachable,
-      humanHasGold,
-      orcHasGold,
-      humanSettlementOk,
-      orcSettlementOk,
-      humanNotEnclosed,
-      orcNotEnclosed,
+      startAReachable,
+      startBReachable,
+      startAHasGold,
+      startBHasGold,
+      startASettlementOk,
+      startBSettlementOk,
+      startANotEnclosed,
+      startBNotEnclosed,
       bridgeCount,
       repairs: [...this.repairs],
     };
@@ -615,50 +624,50 @@ export class MapGenerator {
 
   private repair(report: MapValidationReport) {
     if (!report.startsConnected) {
-      if (this.tryAddBridgeToward(this.humanBase, this.orcBase)) {
+      if (this.tryAddBridgeToward(this.startA, this.startB)) {
         this.repairs.push('bridge-link');
-      } else if (this.carvePassToward(this.humanBase, this.orcBase)) {
+      } else if (this.carvePassToward(this.startA, this.startB)) {
         this.repairs.push('mountain-pass');
       } else {
-        this.forceCorridor(this.humanBase, this.orcBase);
+        this.forceCorridor(this.startA, this.startB);
         this.repairs.push('local-terrain-corridor');
       }
     }
 
-    if (!report.humanNotEnclosed) {
-      this.openBasePerimeter(this.humanBase);
-      this.repairs.push('open-human-base');
+    if (!report.startANotEnclosed) {
+      this.openBasePerimeter(this.startA);
+      this.repairs.push('open-startA');
     }
-    if (!report.orcNotEnclosed) {
-      this.openBasePerimeter(this.orcBase);
-      this.repairs.push('open-orc-base');
-    }
-
-    if (!report.humanSettlementOk) {
-      this.clearBaseArea(this.humanBase.tx, this.humanBase.ty);
-      this.repairs.push('clear-human-settlement');
-    }
-    if (!report.orcSettlementOk) {
-      this.clearBaseArea(this.orcBase.tx, this.orcBase.ty);
-      this.repairs.push('clear-orc-settlement');
+    if (!report.startBNotEnclosed) {
+      this.openBasePerimeter(this.startB);
+      this.repairs.push('open-startB');
     }
 
-    if (!report.humanHasGold) {
-      const g = this.findGoldNear(this.humanBase, MAP_CONFIG.goldNearBaseMin, MAP_CONFIG.goldNearBaseMax);
+    if (!report.startASettlementOk) {
+      this.clearBaseArea(this.startA.tx, this.startA.ty);
+      this.repairs.push('clear-startA-settlement');
+    }
+    if (!report.startBSettlementOk) {
+      this.clearBaseArea(this.startB.tx, this.startB.ty);
+      this.repairs.push('clear-startB-settlement');
+    }
+
+    if (!report.startAHasGold) {
+      const g = this.findGoldNear(this.startA, MAP_CONFIG.goldNearBaseMin, MAP_CONFIG.goldNearBaseMax);
       if (g) {
         this.goldDeposits.push(g);
         this.markGoldTile(g.tx, g.ty);
-        this.ensurePath(this.humanBase, g);
-        this.repairs.push('gold-human');
+        this.ensurePath(this.startA, g);
+        this.repairs.push('gold-startA');
       }
     }
-    if (!report.orcHasGold) {
-      const g = this.findGoldNear(this.orcBase, MAP_CONFIG.goldNearBaseMin, MAP_CONFIG.goldNearBaseMax);
+    if (!report.startBHasGold) {
+      const g = this.findGoldNear(this.startB, MAP_CONFIG.goldNearBaseMin, MAP_CONFIG.goldNearBaseMax);
       if (g) {
         this.goldDeposits.push(g);
         this.markGoldTile(g.tx, g.ty);
-        this.ensurePath(this.orcBase, g);
-        this.repairs.push('gold-orc');
+        this.ensurePath(this.startB, g);
+        this.repairs.push('gold-startB');
       }
     }
 

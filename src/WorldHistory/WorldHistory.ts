@@ -63,6 +63,24 @@ export class WorldHistory {
     return this.events.find((e) => e.id === id);
   }
 
+  /** Replace chronicle events from a save snapshot. */
+  public replaceEvents(events: WorldEvent[]) {
+    this.events = events.map((e) => ({
+      ...e,
+      location: { ...e.location },
+      participants: [...e.participants],
+    }));
+    let maxSeq = 1;
+    for (const e of this.events) {
+      const m = /^we-(\d+)$/.exec(e.id);
+      if (m) maxSeq = Math.max(maxSeq, Number(m[1]) + 1);
+      if (e.timestamp > this.elapsed) this.elapsed = e.timestamp;
+      if (e.location.settlementId) this.knownTownCenters.add(e.location.settlementId);
+    }
+    nextEventSeq = Math.max(nextEventSeq, maxSeq);
+    this.notify();
+  }
+
   public onChange(fn: () => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
