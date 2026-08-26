@@ -31,8 +31,9 @@ npm run pvp
 - `src/Players` — faction definitions and local/AI/remote controllers.
 - `src/Sim` — deterministic command, replay and save pipeline.
 - `src/Assets/Manifest` — schema-driven Asset Manifest v2.
-- `art-kit` / `public/assets` — source art kit and runtime assets.
+- `art/living-world-v2` / `public/assets` — Living World documentation and normalized runtime assets.
 
 Art scale, pivots, tile footprints, directional sprite sheets and team-color
 masks are specified in [Asset Pipeline v2](docs/ASSET_PIPELINE_V2.md).
-
+The complete visual direction, QA boards, source PNGs and animation production
+contract live in [Living World Art Kit v2](art/living-world-v2/README.md).
