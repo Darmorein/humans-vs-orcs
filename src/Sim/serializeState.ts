@@ -18,6 +18,7 @@ import type { GameRng } from './GameRng';
 import { GAME_STATE_VERSION } from './SimClock';
 import type { GameCommand } from './Commands';
 import { captureIdAllocators, type IdAllocatorState } from './IdAllocators';
+import type { SettlementFocus, SettlementSpecialization } from '../Settlement/SettlementFocus';
 import type { SoftSimState } from './SoftSimState';
 import { emptySoftSimState } from './SoftSimState';
 
@@ -85,6 +86,7 @@ export interface GameStateSnapshot {
     structuresRaised?: number;
     settlementsFounded?: number;
     settlerGroupId?: string | null;
+    draftedFromSettlementId?: string | null;
     targetX?: number | null;
     targetY?: number | null;
     facingX?: number;
@@ -119,6 +121,9 @@ export interface GameStateSnapshot {
     queue?: ConstructionProject[];
     expansionRadius?: number;
     layoutId?: string;
+    focus?: SettlementFocus;
+    specialization?: SettlementSpecialization;
+    warShock?: number;
   }>;
   squads?: SquadSnapshot[];
   heroes?: Hero[];
@@ -180,6 +185,9 @@ export function serializeGameState(args: {
       queue: s.queue.list().map((p) => cloneProject(p)),
       expansionRadius: s.expansionRadius,
       layoutId: s.layout.id,
+      focus: s.focus,
+      specialization: s.specialization,
+      warShock: s.warShock,
     })),
     squads: args.squads
       ? args.squads.all().map((sq) => ({

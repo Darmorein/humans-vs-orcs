@@ -43,6 +43,39 @@ export class PopulationSim {
     this.accum = Math.max(0, v);
   }
 
+  /** Draft civilians into the army (aggregate — removes citizens from the pool). */
+  public draftCitizens(s: Settlement, count: number): boolean {
+    if (count <= 0) return true;
+    if (s.citizens.length < count) return false;
+    // Prefer peasants, then farmers; keep builders if possible.
+    const order = ['peasant', 'farmer', 'miner', 'trader', 'craftsman', 'soldier', 'builder'] as const;
+    const picked: number[] = [];
+    for (const prof of order) {
+      for (let i = 0; i < s.citizens.length && picked.length < count; i++) {
+        if (picked.includes(i)) continue;
+        if (s.citizens[i]!.profession === prof) picked.push(i);
+      }
+      if (picked.length >= count) break;
+    }
+    while (picked.length < count && picked.length < s.citizens.length) {
+      for (let i = 0; i < s.citizens.length && picked.length < count; i++) {
+        if (!picked.includes(i)) picked.push(i);
+      }
+    }
+    if (picked.length < count) return false;
+    picked.sort((a, b) => b - a);
+    for (const i of picked) s.citizens.splice(i, 1);
+    s.population = s.citizens.length;
+    return true;
+  }
+
+  /** War casualty shock — citizen already drafted; apply social cost on the seat. */
+  public applyWarCasualty(s: Settlement, severity = 1) {
+    s.warShock = Math.min(1, s.warShock + 0.12 * severity);
+    s.militaryTradition = Math.min(1, s.militaryTradition + 0.01 * severity);
+    s.food = Math.max(0, s.food - 1.5 * severity);
+  }
+
   /** Seed starting villagers when a settlement first gets a town center. */
   public seedIfEmpty(s: Settlement, factionId: FactionId, count = 8) {
     if (s.citizens.length > 0) return;

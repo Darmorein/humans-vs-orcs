@@ -8,6 +8,7 @@ import {
 import { Entity } from '../Entities/Entity';
 import { Unit } from '../Entities/Unit';
 import type { GameMap } from '../Map/GameMap';
+import type { InfluenceMap } from '../Map/InfluenceMap';
 import { canPlaceBuildingAt, footprintForBuildingType } from '../Map/BuildPlacement';
 import { createTile } from '../Map/Terrain';
 import type { MatchState, PlayerState } from '../Players/MatchState';
@@ -23,6 +24,11 @@ import { Settlement } from './Settlement';
 import type { SettlementNeedKind } from './Types';
 import { SettlementPlanner, settlementPlanner } from './SettlementPlanner';
 import { populationSim } from './Population/PopulationSim';
+import {
+  focusNeedBias,
+  type SettlementFocus,
+  type SettlementSpecialization,
+} from './SettlementFocus';
 import {
   evaluateTier,
   isBuildingAllowed,
@@ -118,6 +124,9 @@ export class SettlementSystem {
       queue?: ConstructionProject[];
       expansionRadius?: number;
       layoutId?: string;
+      focus?: SettlementFocus;
+      specialization?: SettlementSpecialization;
+      warShock?: number;
     }>,
     match?: MatchState,
   ) {
@@ -145,6 +154,9 @@ export class SettlementSystem {
       if (typeof row.expansionRadius === 'number') {
         s.expansionRadius = row.expansionRadius;
       }
+      if (row.focus) s.focus = row.focus;
+      if (row.specialization) s.specialization = row.specialization;
+      if (typeof row.warShock === 'number') s.warShock = row.warShock;
 
       if (row.citizens) {
         s.citizens = row.citizens.map((c) => ({
@@ -186,6 +198,7 @@ export class SettlementSystem {
     match: MatchState,
     gameMap: GameMap,
     rng: GameRng,
+    influence?: InfluenceMap,
   ) {
     this.tickRng = rng;
     this.reconcileMains(entities, match);
@@ -193,11 +206,13 @@ export class SettlementSystem {
     for (const s of this.all()) {
       const player = match.getPlayer(s.playerId);
       if (!player || player.isDefeated) continue;
-      this.syncFromWorld(s, entities, player);
+      this.syncFromWorld(s, entities, player, influence);
       this.simulateEconomy(s, dt);
       this.recomputeNeeds(s, player.factionId);
-      this.deriveCivicStats(s, player.factionId);
+      this.deriveCivicStats(s, player.factionId, entities);
       this.refreshTier(s);
+      this.refreshFeedbackHints(s, player.factionId);
+      s.warShock = Math.max(0, s.warShock - dt * 0.035);
       s.buildCooldown = Math.max(0, s.buildCooldown - dt);
       this.enqueueAutonomousIfNeeded(s, player);
       this.processQueue(s, entities, match, gameMap, player, dt);
@@ -432,6 +447,44 @@ export class SettlementSystem {
     return best;
   }
 
+  /**
+   * Draft `count` citizens near a world point for recruitment.
+   * @returns settlement id on success, null if pool too small / no seat.
+   */
+  public draftForRecruitment(
+    playerId: string,
+    nearX: number,
+    nearY: number,
+    count: number,
+  ): string | null {
+    const s = this.nearestSettlement(playerId, nearX, nearY);
+    if (!s || !s.hasTownCenter) return null;
+    if (!populationSim.draftCitizens(s, count)) return null;
+    return s.id;
+  }
+
+  /** Combat death feedback on the nearest owned settlement. */
+  public noteMilitaryCasualty(unit: Unit) {
+    if (!unit.ownerPlayerId) return;
+    const s =
+      (unit.draftedFromSettlementId
+        ? this.settlements.get(unit.draftedFromSettlementId)
+        : undefined) ?? this.nearestSettlement(unit.ownerPlayerId, unit.x, unit.y);
+    if (!s) return;
+    populationSim.applyWarCasualty(s, unit.isHero ? 1.6 : 1);
+    if (!unit.draftedFromSettlementId && s.citizens.length > 0) {
+      // Legacy undrafted unit — social loss from the pool.
+      populationSim.draftCitizens(s, 1);
+    }
+  }
+
+  public setFocus(playerId: string, settlementId: string, focus: SettlementFocus): boolean {
+    const s = this.settlements.get(settlementId);
+    if (!s || s.playerId !== playerId) return false;
+    s.focus = focus;
+    return true;
+  }
+
   private belongsToSettlement(e: Entity, s: Settlement, owned: Settlement[]): boolean {
     if (e.ownerPlayerId !== s.playerId) return false;
     if (e instanceof Building && e.settlementId) return e.settlementId === s.id;
@@ -448,7 +501,12 @@ export class SettlementSystem {
     return nearest.id === s.id;
   }
 
-  private syncFromWorld(s: Settlement, entities: Entity[], player: PlayerState) {
+  private syncFromWorld(
+    s: Settlement,
+    entities: Entity[],
+    player: PlayerState,
+    influence?: InfluenceMap,
+  ) {
     s.gold = player.gold;
     s.unitCount = 0;
     s.housing = 0;
@@ -525,7 +583,17 @@ export class SettlementSystem {
       }
     }
 
-    s.threatPressure = Math.min(1, hostilesNear * 0.22);
+    s.threatPressure = Math.min(1, hostilesNear * 0.22 + s.warShock * 0.55);
+    let enemyTerritory = 0;
+    if (influence) {
+      const ctrl = influence.getControlAt(s.centerX, s.centerY);
+      if (ctrl !== 'none' && ctrl !== 'contested' && ctrl !== player.factionId) {
+        enemyTerritory = 0.35;
+      } else if (ctrl === 'contested') {
+        enemyTerritory = 0.18;
+      }
+    }
+    s.threatPressure = Math.min(1, s.threatPressure + enemyTerritory);
     const garrison = Math.min(1, militaryWeight * 0.12);
     const soldierBonus = populationSim.countByProfession(s).soldier * 0.04;
     s.safety = Math.max(
@@ -568,9 +636,15 @@ export class SettlementSystem {
     let defense =
       s.safety < 0.55 ? clamp((0.55 - s.safety) / 0.55, 0, 1) : s.threatPressure * 0.8;
     s.needs.defense = clamp(defense * d.defenseNeedBias, 0, 1);
+
+    const bias = focusNeedBias(s.focus);
+    s.needs.housing = clamp(s.needs.housing * bias.housing, 0, 1);
+    s.needs.food = clamp(s.needs.food * bias.food, 0, 1);
+    s.needs.storage = clamp(s.needs.storage * bias.storage, 0, 1);
+    s.needs.defense = clamp(s.needs.defense * bias.defense, 0, 1);
   }
 
-  private deriveCivicStats(s: Settlement, factionId: FactionId) {
+  private deriveCivicStats(s: Settlement, factionId: FactionId, entities: Entity[]) {
     const d = doctrineOf(factionId);
     const by = populationSim.countByProfession(s);
     const n = Math.max(1, s.citizens.length);
@@ -578,7 +652,9 @@ export class SettlementSystem {
     const wantBuilders = Math.ceil(
       n * (s.needs.housing > 0.3 ? 0.12 : 0.06) * d.builderBias,
     );
-    const wantCraft = Math.ceil(n * 0.08 * d.craftsmanBias);
+    const craftBias =
+      d.craftsmanBias * (s.focus === 'crafting' ? 1.35 : s.focus === 'military' ? 0.85 : 1);
+    const wantCraft = Math.ceil(n * 0.08 * craftBias);
     const open =
       Math.max(0, wantFarmers - by.farmer) +
       Math.max(0, wantBuilders - by.builder) +
@@ -591,42 +667,41 @@ export class SettlementSystem {
         s.gold / 800 +
         s.farmCount * 0.06 +
         by.farmer * 0.02 +
-        by.craftsman * 0.015 * d.craftProsperityBias,
+        by.craftsman * 0.015 * d.craftProsperityBias -
+        s.warShock * 0.15,
       0,
       1,
     );
     s.culture = clamp(0.2 + s.houseCount * 0.08 + s.prosperity * 0.3, 0, 1);
     s.knowledge = clamp(
-      0.2 + s.storageCount * 0.1 + s.culture * 0.2 + by.craftsman * 0.04 * d.craftProsperityBias,
+      0.2 + s.prosperity * 0.2 + by.craftsman * 0.03 + (s.focus === 'crafting' ? 0.08 : 0),
       0,
       1,
     );
     s.faith = clamp(0.25 + s.safety * 0.25 + s.houseCount * 0.04, 0, 1);
     s.craftsmanship = clamp(
-      0.25 +
-        s.storageCount * 0.12 * d.craftProsperityBias +
-        s.wood / 200 +
-        by.craftsman * 0.06 * d.craftsmanBias,
+      0.2 +
+        by.craftsman * 0.05 * d.craftProsperityBias +
+        s.knowledge * 0.25 +
+        (s.focus === 'crafting' ? 0.12 : 0) +
+        (s.specialization === 'crafting' ? 0.1 : 0),
       0,
       1,
     );
     s.militaryTradition = clamp(
-      0.2 +
-        (1 - s.safety) * 0.2 +
-        s.threatPressure * 0.4 +
-        by.soldier * 0.04 * d.soldierBias +
-        0.08 * d.militaryTraditionGain,
+      s.militaryTradition * 0.998 +
+        by.soldier * 0.002 +
+        (s.focus === 'military' ? 0.0015 : 0) +
+        (s.specialization === 'fortress' ? 0.001 : 0),
       0,
       1,
     );
 
-    const foodScore = clamp(s.food / Math.max(1, s.capacity.food), 0, 1);
+    const foodScore = clamp(s.food / 40, 0, 1.2);
     const housingScore =
-      s.housing > 0 ? clamp((s.housing - s.population) / Math.max(1, s.housing) + 0.45, 0, 1) : 0;
-
+      s.housing > 0 ? clamp(1 - s.population / Math.max(1, s.housing), 0, 1) : 0;
     const expansionPush =
-      d.expansionPressure *
-      (s.population > s.housing * 0.9 ? 0.15 : 0) *
+      (s.tier === 'city' ? 0.08 : 0) *
       (s.prosperity > 0.45 ? 1 : 0.5);
 
     s.migrationAttraction = clamp(
@@ -636,7 +711,8 @@ export class SettlementSystem {
         s.prosperity * 0.18 +
         s.jobs * 0.18 +
         TIER_DEFS[s.tier].migrationBonus -
-        expansionPush,
+        expansionPush -
+        s.warShock * 0.25,
       0,
       1,
     );
@@ -646,10 +722,52 @@ export class SettlementSystem {
         s.militaryTradition * 0.25 * d.influenceMilitaryWeight +
         s.culture * 0.25 +
         s.gold / 1000 +
-        s.craftsmanship * 0.1 * d.craftProsperityBias,
+        s.craftsmanship * 0.1 * d.craftProsperityBias +
+        (s.specialization === 'fortress' ? 0.08 : 0),
       0,
       1,
     );
+
+    s.specialization = this.detectSpecialization(s, entities);
+  }
+
+  private detectSpecialization(s: Settlement, entities: Entity[]): SettlementSpecialization {
+    let hasSmith = false;
+    let hasFort = false;
+    let hasTemple = false;
+    let hasMarket = false;
+    for (const e of entities) {
+      if (!(e instanceof Building) || e.isDead || e.settlementId !== s.id) continue;
+      if (e.buildingType === 'Blacksmith') hasSmith = true;
+      if (e.buildingType === 'Fort' || e.buildingType === 'Wall') hasFort = true;
+      if (e.buildingType === 'Temple') hasTemple = true;
+      if (e.buildingType === 'Market') hasMarket = true;
+    }
+    if (hasSmith && s.craftsmanship > 0.45 && s.iron > 20) return 'crafting';
+    if (hasFort && s.militaryTradition > 0.4) return 'fortress';
+    if (hasTemple && s.faith > 0.55) return 'religious';
+    if (hasMarket && s.prosperity > 0.5) return 'trade';
+    if (s.farmCount >= 3 && s.farmCount > s.houseCount) return 'farming';
+    if (s.iron > 80 && s.stone > 80) return 'mining';
+    return 'none';
+  }
+
+  private refreshFeedbackHints(s: Settlement, factionId: FactionId) {
+    void factionId;
+    const growth: string[] = [];
+    if (s.housing > 0 && s.population >= s.housing) growth.push('Housing shortage');
+    if (s.food < 12) growth.push('Low food');
+    if (s.threatPressure > 0.35) growth.push('Enemy army nearby');
+    if (s.warShock > 0.2) growth.push('Recent war losses');
+    if (s.focus === 'growth') growth.push('Focus: Growth');
+    s.growthHints = growth.slice(0, 3);
+
+    const safety: string[] = [];
+    if (s.threatPressure > 0.4) safety.push('Hostiles nearby');
+    if (s.warShock > 0.25) safety.push('War shock');
+    if (s.needs.defense > 0.45) safety.push('Needs fortifications');
+    if (s.unitCount < 3) safety.push('Thin garrison');
+    s.safetyHints = safety.slice(0, 3);
   }
 
   private refreshTier(s: Settlement) {

@@ -40,7 +40,9 @@ export class Unit extends Entity {
   public maxGoldCapacity: number = 10;
   private gatherTimer: number = 0;
   public buildTarget: any = null;
-  /** When set, unit is part of a Settler Group founding mission. */
+  /** When set, this unit was drafted from civic population (casualty already paid). */
+  public draftedFromSettlementId: string | null = null;
+  /** Active settler expedition group — null when not founding. */
   public settlerGroupId: string | null = null;
   /** Combat Squad id — null for workers / unassigned. */
   public squadId: string | null = null;
@@ -100,6 +102,7 @@ export class Unit extends Entity {
       structuresRaised: this.structuresRaised,
       settlementsFounded: this.settlementsFounded,
       settlerGroupId: this.settlerGroupId,
+      draftedFromSettlementId: this.draftedFromSettlementId,
       targetX: this.targetX,
       targetY: this.targetY,
       facingX: this.facingX,
@@ -125,6 +128,7 @@ export class Unit extends Entity {
       structuresRaised?: number;
       settlementsFounded?: number;
       settlerGroupId?: string | null;
+      draftedFromSettlementId?: string | null;
       targetX?: number | null;
       targetY?: number | null;
       facingX?: number;
@@ -148,6 +152,9 @@ export class Unit extends Entity {
     if (rt.structuresRaised != null) this.structuresRaised = rt.structuresRaised;
     if (rt.settlementsFounded != null) this.settlementsFounded = rt.settlementsFounded;
     if (rt.settlerGroupId !== undefined) this.settlerGroupId = rt.settlerGroupId;
+    if (rt.draftedFromSettlementId !== undefined) {
+      this.draftedFromSettlementId = rt.draftedFromSettlementId;
+    }
     if (rt.targetX !== undefined) this.targetX = rt.targetX;
     if (rt.targetY !== undefined) this.targetY = rt.targetY;
     if (rt.facingX != null) this.facingX = rt.facingX;

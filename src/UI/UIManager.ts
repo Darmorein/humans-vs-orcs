@@ -12,6 +12,12 @@ import {
 } from '../Settlement/ConstructionCatalog';
 import { populationSim, professionLabel } from '../Settlement/Population';
 import { TIER_DEFS } from '../Settlement/SettlementTier';
+import {
+  SETTLEMENT_FOCUSES,
+  settlementFocusLabel,
+  specializationLabel,
+  type SettlementFocus,
+} from '../Settlement/SettlementFocus';
 import { doctrineOf } from '../Players/FactionDoctrine';
 import { isCombatUnitType } from '../Combat/Squad';
 import { ALL_FORMATIONS, formationLabel } from '../Combat/FormationDefs';
@@ -62,7 +68,7 @@ export class UIManager {
           .list()
           .map((p) => `${p.id}:${p.status}`)
           .join('|') +
-        `|c${settlement.population}|t${settlement.tier}|g${groupReady ? 1 : 0}|sq${squads.map((s) => `${s.id}:${s.size}`).join(',')}|h${this.game.getHeroSystem().heroesForPlayer(local?.id ?? '').map((h) => h.id).join(',')}|a${this.game.getArtifactSystem().forPlayer(local?.id ?? '').map((x) => `${x.id}:${x.boundUnitId ?? 'v'}`).join(',')}`
+        `|c${settlement.population}|t${settlement.tier}|f${settlement.focus}|sp${settlement.specialization}|w${settlement.warShock.toFixed(2)}|g${groupReady ? 1 : 0}|sq${squads.map((s) => `${s.id}:${s.size}`).join(',')}|h${this.game.getHeroSystem().heroesForPlayer(local?.id ?? '').map((h) => h.id).join(',')}|a${this.game.getArtifactSystem().forPlayer(local?.id ?? '').map((x) => `${x.id}:${x.boundUnitId ?? 'v'}`).join(',')}`
       : `sq${squads.map((s) => `${s.id}:${s.size}`).join(',')}`;
 
     if (
@@ -131,7 +137,16 @@ export class UIManager {
           .map(([role, n]) => `${professionLabel(local.factionId, role)} ${n}`)
           .join(', ');
         infoHtml += `<p>${TIER_DEFS[settlement.tier].label} · Citizens ${settlement.population}/${settlement.housing}</p>`;
+        infoHtml += `<p>Safety ${Math.round(settlement.safety * 100)}% · Focus ${settlementFocusLabel(settlement.focus)} · ${specializationLabel(settlement.specialization)}</p>`;
         infoHtml += `<p class="muted">Attract ${Math.round(settlement.migrationAttraction * 100)}% · Jobs ${Math.round(settlement.jobs * 100)}%</p>`;
+        const growth = settlement.growthHints.slice(0, 3);
+        const safetyH = settlement.safetyHints.slice(0, 3);
+        if (growth.length) {
+          infoHtml += `<p class="muted">Growth: ${growth.join('; ')}</p>`;
+        }
+        if (safetyH.length) {
+          infoHtml += `<p class="muted">Safety: ${safetyH.join('; ')}</p>`;
+        }
         if (top) infoHtml += `<p class="muted">${top}</p>`;
         const heroes = this.game.getHeroSystem().heroesForPlayer(local.id);
         if (heroes.length > 0) {
@@ -238,9 +253,14 @@ export class UIManager {
     if (entity instanceof Building && isMainBuilding(entity.buildingType)) {
       if (!entity.isConstructed) return;
 
-      const workerCost = getUnitDef(faction.workerType)?.goldCost ?? 50;
-      this.createButton(`Train ${faction.workerType} (${workerCost}G)`, gold >= workerCost, () =>
-        this.game.trainUnit(entity, faction.workerType),
+      const workerDef = getUnitDef(faction.workerType);
+      const workerCost = workerDef?.goldCost ?? 50;
+      const workerPop = workerDef?.populationCost ?? 1;
+      const canDraftWorker = (settlement?.population ?? 0) >= workerPop;
+      this.createButton(
+        `Train ${faction.workerType} (${workerCost}G + ${workerPop} cit)`,
+        gold >= workerCost && canDraftWorker,
+        () => this.game.trainUnit(entity, faction.workerType),
       );
 
       for (const recipe of strategicOptionsForFaction(local.factionId, settlement?.tier)) {
@@ -254,6 +274,17 @@ export class UIManager {
           !!afford,
           () => this.game.startBuildingPlacement(recipe.target as BuildingType),
         );
+      }
+
+      if (settlement) {
+        for (const f of SETTLEMENT_FOCUSES) {
+          const active = settlement.focus === f;
+          this.createButton(
+            `Focus: ${settlementFocusLabel(f)}${active ? ' ✓' : ''}`,
+            true,
+            () => this.game.setSettlementFocus(settlement.id, f as SettlementFocus),
+          );
+        }
       }
 
       const canForm = this.game.canFormSettlerGroup();
@@ -282,13 +313,22 @@ export class UIManager {
       this.renderQueueControls(settlement);
     } else if (entity instanceof Building && entity.buildingType === faction.productionBuilding) {
       if (!entity.isConstructed) return;
-      const meleeCost = getUnitDef(faction.meleeType)?.goldCost ?? 80;
-      const rangedCost = getUnitDef(faction.rangedType)?.goldCost ?? 100;
-      this.createButton(`Train ${faction.meleeType} (${meleeCost}G)`, gold >= meleeCost, () =>
-        this.game.trainUnit(entity, faction.meleeType),
+      const meleeDef = getUnitDef(faction.meleeType);
+      const rangedDef = getUnitDef(faction.rangedType);
+      const meleeCost = meleeDef?.goldCost ?? 80;
+      const rangedCost = rangedDef?.goldCost ?? 100;
+      const meleePop = meleeDef?.populationCost ?? 1;
+      const rangedPop = rangedDef?.populationCost ?? 1;
+      const cit = settlement?.population ?? 0;
+      this.createButton(
+        `Train ${faction.meleeType} (${meleeCost}G + ${meleePop} cit)`,
+        gold >= meleeCost && cit >= meleePop,
+        () => this.game.trainUnit(entity, faction.meleeType),
       );
-      this.createButton(`Train ${faction.rangedType} (${rangedCost}G)`, gold >= rangedCost, () =>
-        this.game.trainUnit(entity, faction.rangedType),
+      this.createButton(
+        `Train ${faction.rangedType} (${rangedCost}G + ${rangedPop} cit)`,
+        gold >= rangedCost && cit >= rangedPop,
+        () => this.game.trainUnit(entity, faction.rangedType),
       );
     }
   }

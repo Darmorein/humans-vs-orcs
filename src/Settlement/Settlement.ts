@@ -3,6 +3,7 @@ import { pickLayoutForId, type SettlementLayoutProfile } from './LayoutVariants'
 import { ConstructionQueue } from './ConstructionQueue';
 import type { Citizen } from './Population/Types';
 import { TIER_DEFS, type SettlementTier } from './SettlementTier';
+import type { SettlementFocus, SettlementSpecialization } from './SettlementFocus';
 
 /**
  * Autonomous settlement seat owned by one Player (a player may own several).
@@ -50,6 +51,16 @@ export class Settlement {
   public migrationAttraction = 0.4;
   /** Civic prestige — also feeds InfluenceMap territory strength. */
   public influence = 0.3;
+
+  /** Player strategic focus — soft autonomous bias. */
+  public focus: SettlementFocus = 'balanced';
+  /** Emergent role from buildings / economy (world-driven). */
+  public specialization: SettlementSpecialization = 'none';
+  /** Short reasons for UI (growth / safety), refreshed each tick. */
+  public growthHints: string[] = [];
+  public safetyHints: string[] = [];
+  /** Decaying war shock from nearby casualties (0..1). */
+  public warShock = 0;
 
   public capacity: SettlementCapacity = {
     food: 80,

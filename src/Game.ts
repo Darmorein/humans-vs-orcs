@@ -28,6 +28,7 @@ import {
 import { SettlementSystem } from './Settlement/SettlementSystem';
 import { populationSim, PopulationSim } from './Settlement/Population/PopulationSim';
 import { TIER_DEFS } from './Settlement/SettlementTier';
+import type { SettlementFocus } from './Settlement/SettlementFocus';
 import { InfluenceMap } from './Map/InfluenceMap';
 import { SquadSystem } from './Combat/SquadSystem';
 import { HeroSystem } from './Heroes';
@@ -181,6 +182,7 @@ export class Game {
       if (victim.isHero || victim.heroId) this.heroSystem.noteHeroFallen(victim, killer);
       if (victim.artifactId) this.artifactSystem.noteCarrierKilled(victim, killer);
       this.worldHistory.noteCombatDeath(victim, killer);
+      this.settlementSystem.noteMilitaryCasualty(victim);
     };
     Building.onConstructed = (building, entities) => {
       const builders: Unit[] = entities.filter(
@@ -606,6 +608,16 @@ export class Game {
     });
   }
 
+  /** Soft development focus for an owned settlement seat. */
+  public setSettlementFocus(settlementId: string, focus: SettlementFocus) {
+    this.submitCommand({
+      type: 'setSettlementFocus',
+      playerId: this.match.localPlayerId,
+      settlementId,
+      focus,
+    });
+  }
+
   private buildControllers(match: MatchState): PlayerController[] {
     const list: PlayerController[] = [];
     this.aiControllers = [];
@@ -944,7 +956,14 @@ export class Game {
       }
     }
 
-    this.settlementSystem.update(dt, this.entities, this.match, this.gameMap, this.simRng);
+    this.settlementSystem.update(
+      dt,
+      this.entities,
+      this.match,
+      this.gameMap,
+      this.simRng,
+      this.influenceMap,
+    );
     this.influenceMap.update(dt, this.settlementSystem.all(), this.match);
     this.squadSystem.update(dt, {
       entities: this.entities,

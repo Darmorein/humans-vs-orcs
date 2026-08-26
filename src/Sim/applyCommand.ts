@@ -71,6 +71,8 @@ export function applyCommand(cmd: GameCommand, world: CommandWorld): boolean {
       return applyUnequipArtifact(cmd, world);
     case 'transferArtifact':
       return applyTransferArtifact(cmd, world);
+    case 'setSettlementFocus':
+      return world.settlements.setFocus(cmd.playerId, cmd.settlementId, cmd.focus);
     default:
       return false;
   }
@@ -199,9 +201,21 @@ function applyTrainUnit(
     cmd.unitType === faction.meleeType || cmd.unitType === faction.rangedType;
   const d = doctrineOf(player.factionId);
   const paid = Math.floor(def.goldCost * (isMilitary ? d.militaryTrainGoldMul : 1));
+  if (player.gold < paid) return false;
+
+  const popCost = Math.max(1, def.populationCost);
+  // Draft before spend — reject without taking gold if the citizen pool is empty.
+  const draftSettlementId = world.settlements.draftForRecruitment(
+    cmd.playerId,
+    building.x,
+    building.y,
+    popCost,
+  );
+  if (!draftSettlementId) return false;
+
   if (!world.match.trySpend(cmd.playerId, paid)) return false;
 
-  spawnUnitNearBuilding({
+  const unit = spawnUnitNearBuilding({
     player,
     unitType: cmd.unitType,
     buildingX: building.x,
@@ -213,6 +227,7 @@ function applyTrainUnit(
     distMin: 55,
     distMax: 55,
   });
+  unit.draftedFromSettlementId = draftSettlementId;
   return true;
 }
 

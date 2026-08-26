@@ -22,6 +22,16 @@ export {
   type SettlementLayoutProfile,
 } from './LayoutVariants';
 export type {
+  SettlementFocus,
+  SettlementSpecialization,
+} from './SettlementFocus';
+export {
+  SETTLEMENT_FOCUSES,
+  settlementFocusLabel,
+  specializationLabel,
+  focusNeedBias,
+} from './SettlementFocus';
+export type {
   SettlementCapacity,
   SettlementNeedKind,
   SettlementNeeds,

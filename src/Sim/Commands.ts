@@ -1,5 +1,6 @@
 import type { BuildingType } from '../Entities/Building';
 import type { SquadFormation } from '../Combat/FormationDefs';
+import type { SettlementFocus } from '../Settlement/SettlementFocus';
 
 /**
  * Player-intent commands — serializable for lockstep / replay / PvP.
@@ -21,7 +22,8 @@ export type GameCommand =
   | SurrenderCommand
   | EquipArtifactCommand
   | UnequipArtifactCommand
-  | TransferArtifactCommand;
+  | TransferArtifactCommand
+  | SetSettlementFocusCommand;
 
 interface CommandBase {
   /** Issuing seat — unambiguous Player ID. */
@@ -127,6 +129,12 @@ export interface TransferArtifactCommand extends CommandBase {
   artifactId: string;
   /** Target unit; omit / null to vault (unequip to settlement vault). */
   unitId: number | null;
+}
+
+export interface SetSettlementFocusCommand extends CommandBase {
+  type: 'setSettlementFocus';
+  settlementId: string;
+  focus: SettlementFocus;
 }
 
 export function isGameCommand(v: unknown): v is GameCommand {

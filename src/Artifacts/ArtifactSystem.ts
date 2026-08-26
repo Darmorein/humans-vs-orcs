@@ -309,26 +309,37 @@ export class ArtifactSystem {
     });
 
     const highCraft = s.craftsmanship >= 0.55;
+    const craftingTown = s.specialization === 'crafting' || s.focus === 'crafting';
     const highProsperity = s.prosperity >= 0.48;
     const rareMaterial =
       s.iron >= 40 && s.iron / Math.max(1, s.capacity.iron) >= 0.5;
 
     // Primary recipe from the prompt
-    if (highCraft && smithHero && rareMaterial && highProsperity && hasSmithBuilding) {
+    if (
+      (highCraft || craftingTown) &&
+      smithHero &&
+      rareMaterial &&
+      highProsperity &&
+      hasSmithBuilding
+    ) {
       const strength =
         (s.craftsmanship - 0.55) * 1.2 +
         (s.prosperity - 0.48) * 1.0 +
         Math.min(0.25, (s.iron - 40) / 80) +
-        smithHero.prestige / 400;
+        smithHero.prestige / 400 +
+        (craftingTown ? 0.18 : 0) +
+        Math.max(0, s.craftsmanship - 0.45) * (craftingTown ? 0.35 : 0);
       const quality = this.rollQuality(strength + s.craftsmanship * 0.3, rng);
       const type = this.pickCraftedType(factionId, s, rng);
       return {
         type,
         quality,
         creatorId: smithHero.id,
-        chance: Math.min(0.42, 0.08 + strength * 0.55),
+        chance: Math.min(0.48, 0.08 + strength * 0.55 + (craftingTown ? 0.06 : 0)),
         ironCost: quality === 'legendary' ? 28 : quality === 'masterwork' ? 20 : 14,
-        reason: 'High craftsmanship, master smith, rare iron, prosperity',
+        reason: craftingTown
+          ? 'Crafting specialization, smith, rare iron, prosperity'
+          : 'High craftsmanship, master smith, rare iron, prosperity',
       };
     }
 
