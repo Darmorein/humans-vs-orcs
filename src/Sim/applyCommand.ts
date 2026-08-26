@@ -4,6 +4,7 @@ import { Building } from '../Entities/Building';
 import type { MatchState } from '../Players/MatchState';
 import type { SettlementSystem } from '../Settlement/SettlementSystem';
 import type { SquadSystem } from '../Combat/SquadSystem';
+import type { MilitaryRecruitmentSystem } from '../Combat/MilitaryRecruitment';
 import type { ArtifactSystem } from '../Artifacts/ArtifactSystem';
 import { doctrineOf } from '../Players/FactionDoctrine';
 import { canPlaceBuildingAt, footprintForBuildingType } from '../Map/BuildPlacement';
@@ -20,6 +21,7 @@ export interface CommandWorld {
   match: MatchState;
   settlements: SettlementSystem;
   squads: SquadSystem;
+  recruitment?: MilitaryRecruitmentSystem;
   rng: GameRng;
   gameMap: GameMap;
   artifacts?: ArtifactSystem;
@@ -59,6 +61,10 @@ export function applyCommand(cmd: GameCommand, world: CommandWorld): boolean {
       return applyFormSettler(cmd, world);
     case 'trainUnit':
       return applyTrainUnit(cmd, world);
+    case 'recruitSquad':
+      return applyRecruitSquad(cmd, world);
+    case 'reinforceSquad':
+      return applyReinforceSquad(cmd, world);
     case 'moveAgents':
       return applyMoveAgents(cmd, world);
     case 'gather':
@@ -92,7 +98,7 @@ function applyMoveSquad(
 ): boolean {
   const squad = world.squads.get(cmd.squadId);
   if (!squad || squad.ownerPlayerId !== cmd.playerId) return false;
-  world.squads.orderMove(squad, cmd.x, cmd.y, world.entities);
+  world.squads.orderMove(squad, cmd.x, cmd.y, world.entities, world.gameMap);
   return true;
 }
 
@@ -131,7 +137,7 @@ function applyFormation(
 ): boolean {
   const squad = world.squads.get(cmd.squadId);
   if (!squad || squad.ownerPlayerId !== cmd.playerId) return false;
-  world.squads.setFormation(squad, cmd.formation, world.entities);
+  world.squads.setFormation(squad, cmd.formation, world.entities, world.gameMap);
   return true;
 }
 
@@ -233,6 +239,39 @@ function applyTrainUnit(
   });
   unit.draftedFromSettlementId = draftSettlementId;
   return true;
+}
+
+function applyRecruitSquad(
+  cmd: Extract<GameCommand, { type: 'recruitSquad' }>,
+  world: CommandWorld,
+): boolean {
+  if (!world.recruitment) return false;
+  return (
+    world.recruitment.enqueueRecruit({
+      playerId: cmd.playerId,
+      templateId: cmd.templateId,
+      entities: world.entities,
+      match: world.match,
+      settlements: world.settlements,
+    }) != null
+  );
+}
+
+function applyReinforceSquad(
+  cmd: Extract<GameCommand, { type: 'reinforceSquad' }>,
+  world: CommandWorld,
+): boolean {
+  if (!world.recruitment) return false;
+  return (
+    world.recruitment.enqueueReinforce({
+      playerId: cmd.playerId,
+      squadId: cmd.squadId,
+      entities: world.entities,
+      match: world.match,
+      settlements: world.settlements,
+      squads: world.squads,
+    }) != null
+  );
 }
 
 function applyMoveAgents(

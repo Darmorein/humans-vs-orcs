@@ -13,6 +13,16 @@ export { SquadSystem } from './SquadSystem';
 export type { SquadUpdateContext } from './SquadSystem';
 export { formationOffsets, orientOffsets } from './Formations';
 export {
+  allSquadTemplates,
+  getSquadTemplate,
+  squadTemplatesForFaction,
+  defaultMeleeSquadTemplate,
+  defaultRangedSquadTemplate,
+} from './SquadTemplates';
+export type { SquadTemplate } from './SquadTemplates';
+export { MilitaryRecruitmentSystem } from './MilitaryRecruitment';
+export type { MilitaryJob, MilitaryJobSnapshot } from './MilitaryRecruitment';
+export {
   MORALE_MAX,
   MORALE_DEFAULT,
   ROUT_THRESHOLD,

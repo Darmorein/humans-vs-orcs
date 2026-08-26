@@ -20,6 +20,7 @@ export interface HydrateTarget {
   match: MatchState;
   settlements: SettlementSystem;
   squads: SquadSystem;
+  recruitment?: import('../Combat/MilitaryRecruitment').MilitaryRecruitmentSystem;
   rng: GameRng;
   setSimTick: (tick: number) => void;
   unitOptions: (type: string) => {
@@ -211,6 +212,12 @@ export function hydrateFromSnapshot(snap: GameStateSnapshot, target: HydrateTarg
 
   if (hasSquadSnap && snap.squads) {
     target.squads.hydrateFromSnapshot(snap.squads);
+  }
+
+  if (target.recruitment) {
+    target.recruitment.clear();
+    target.recruitment.restore(snap.militaryJobs);
+    target.recruitment.restoreNameOrdinals(snap.recruitNameOrdinals);
   }
 
   if (target.heroes && snap.heroes) {

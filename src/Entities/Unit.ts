@@ -74,6 +74,16 @@ export class Unit extends Entity {
   public formationFirstContactMul = 1;
   public facingX = 0;
   public facingY = 1;
+  /** Squad shared-march: chase live formation slot (no independent strategic A*). */
+  public followSquadMarch = false;
+  public formationSlotIndex = -1;
+  /** Optional approach point while attacking (ring spread). */
+  public approachX: number | null = null;
+  public approachY: number | null = null;
+  private stuckTimer = 0;
+  private stuckSignal = false;
+  private lastProgressX = 0;
+  private lastProgressY = 0;
   /** Squad is broken and fleeing. */
   public isRouting = false;
   /**
@@ -237,7 +247,61 @@ export class Unit extends Entity {
     this.orderTarget = null;
     this.gatherTarget = null;
     this.buildTarget = null;
+    this.followSquadMarch = false;
+    this.approachX = null;
+    this.approachY = null;
+    this.clearStuckProgress();
     this.clearPath();
+  }
+
+  /** Soft seek used by squad formation slots (keeps followSquadMarch). */
+  public setFormationSeek(x: number, y: number) {
+    this.targetX = x;
+    this.targetY = y;
+    this.targetEntity = null;
+    this.orderTarget = null;
+    this.gatherTarget = null;
+    this.buildTarget = null;
+    this.approachX = null;
+    this.approachY = null;
+  }
+
+  public applySharedPath(path: { x: number; y: number }[]) {
+    this.path = path;
+    this.pathIndex = 0;
+  }
+
+  public clearStuckProgress() {
+    this.stuckTimer = 0;
+    this.stuckSignal = false;
+    this.lastProgressX = this.x;
+    this.lastProgressY = this.y;
+  }
+
+  /** True once when unit stalled while ordered to move (~0.7s). */
+  public consumeStuckSignal(): boolean {
+    const s = this.stuckSignal;
+    this.stuckSignal = false;
+    this.stuckTimer = 0;
+    return s;
+  }
+
+  public applyStuckNudge(
+    ox: number,
+    oy: number,
+    gameMap?: GameMap,
+    entities?: Entity[],
+  ) {
+    const nx = this.x + ox;
+    const ny = this.y + oy;
+    if (this.canOccupy(nx, ny, gameMap, entities)) {
+      this.x = nx;
+      this.y = ny;
+    } else if (this.canOccupy(nx, this.y, gameMap, entities)) {
+      this.x = nx;
+    } else if (this.canOccupy(this.x, ny, gameMap, entities)) {
+      this.y = ny;
+    }
   }
 
   public attackCommand(entity: Entity) {
@@ -248,6 +312,10 @@ export class Unit extends Entity {
     this.targetY = null;
     this.gatherTarget = null;
     this.buildTarget = null;
+    this.followSquadMarch = false;
+    this.approachX = null;
+    this.approachY = null;
+    this.clearStuckProgress();
     this.clearPath();
   }
 
@@ -366,11 +434,15 @@ export class Unit extends Entity {
             this.chargeStrikeReady = false;
           }
           this.clearPath();
+          this.approachX = null;
+          this.approachY = null;
         } else if (this.holdGround) {
           // Hold Ground: no pursuit — wait for enemy to enter range
           this.clearPath();
         } else {
-          this.chasePoint(this.targetEntity.x, this.targetEntity.y, dt, gameMap, entities);
+          const ax = this.approachX ?? this.targetEntity.x;
+          const ay = this.approachY ?? this.targetEntity.y;
+          this.chasePoint(ax, ay, dt, gameMap, entities);
         }
       }
     } else if (this.targetX !== null && this.targetY !== null) {
@@ -382,6 +454,31 @@ export class Unit extends Entity {
         this.chasePoint(this.targetX, this.targetY, dt, gameMap, entities);
       }
     }
+
+    const moved = Math.hypot(this.x - startX, this.y - startY);
+    const tryingToMove =
+      !this.isDead &&
+      (this.followSquadMarch ||
+        this.targetX !== null ||
+        (this.targetEntity !== null && !this.holdGround));
+    if (tryingToMove) {
+      const progress = Math.hypot(this.x - this.lastProgressX, this.y - this.lastProgressY);
+      if (moved < 0.4 && progress < 2.5) {
+        this.stuckTimer += dt;
+        if (this.stuckTimer >= 0.7) {
+          this.stuckSignal = true;
+          this.lastProgressX = this.x;
+          this.lastProgressY = this.y;
+        }
+      } else {
+        this.stuckTimer = 0;
+        this.lastProgressX = this.x;
+        this.lastProgressY = this.y;
+      }
+    } else {
+      this.stuckTimer = 0;
+    }
+
     this.updateVisualAnimation(dt, this.x !== startX || this.y !== startY);
   }
 
@@ -619,9 +716,24 @@ export class Unit extends Entity {
     entities?: Entity[],
   ) {
     if (gameMap) {
+      // Near slot / approach: direct seek (avoids N×A* for formation members).
+      const near = Math.hypot(gx - this.x, gy - this.y);
+      if (this.followSquadMarch && near < 90) {
+        this.stepToward(gx, gy, dt, gameMap, entities);
+        return;
+      }
+
       if (this.path.length === 0 || this.pathIndex >= this.path.length) {
-        this.path = gameMap.findPath(this.x, this.y, gx, gy);
+        this.path = gameMap.findPath(this.x, this.y, gx, gy, entities, this.buildTarget);
         this.pathIndex = 0;
+        if (this.path.length > 0) {
+          const last = this.path[this.path.length - 1]!;
+          // Snap order target to walkable goal so arrival <4 can succeed.
+          if (!this.followSquadMarch && this.targetX !== null) {
+            this.targetX = last.x;
+            this.targetY = last.y;
+          }
+        }
       }
 
       if (this.path.length > 0) {
@@ -630,6 +742,7 @@ export class Unit extends Entity {
           this.pathIndex++;
           if (this.pathIndex >= this.path.length) {
             this.path = [];
+            this.stepToward(gx, gy, dt, gameMap, entities);
             return;
           }
         }
@@ -664,10 +777,9 @@ export class Unit extends Entity {
       this.y = ny;
     } else if (this.canOccupy(nx, this.y, gameMap, entities)) {
       this.x = nx;
-      this.clearPath();
+      // Soft slide — keep path unless fully jammed later
     } else if (this.canOccupy(this.x, ny, gameMap, entities)) {
       this.y = ny;
-      this.clearPath();
     } else {
       this.clearPath();
     }
@@ -786,7 +898,7 @@ export class Unit extends Entity {
     this.visualAnimationEvents = result.events;
   }
 
-  private clearPath() {
+  public clearPath() {
     this.path = [];
     this.pathIndex = 0;
   }

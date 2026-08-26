@@ -120,14 +120,15 @@ function scoreExpand(sit: StrategicSituation): ScoredState {
 function scoreAttack(sit: StrategicSituation): ScoredState {
   let score = 0;
   if (!sit.hasProduction) return { state: 'attack', score: 0, reason: 'no barracks' };
-  if (sit.armyCount >= 5 && sit.armyRatio >= 1.15) score += 34;
-  if (sit.armyCount >= 7 && sit.armyRatio >= 1.0) score += 22;
-  if (sit.gold >= 80 && sit.prosperity > 0.35) score += 10;
+  if (sit.armyCount >= 3 && sit.armyRatio >= 0.85) score += 28;
+  if (sit.armyCount >= 5 && sit.armyRatio >= 1.0) score += 22;
+  if (sit.armyCount >= 7 && sit.armyRatio >= 0.95) score += 16;
+  if (sit.gold >= 60 && sit.prosperity > 0.3) score += 10;
   if (sit.territoryOwnShare > 0.45) score += 8;
-  if (sit.doctrineHarass > 0.6 && sit.armyRatio >= 1.05) score += 8;
+  if (sit.doctrineHarass > 0.6 && sit.armyRatio >= 0.9) score += 8;
   if (sit.threatNearBase > 0) score *= 0.15;
-  if (sit.armyRatio < 0.9) score *= 0.4;
-  if (sit.workerCount < 4) score *= 0.7;
+  if (sit.armyRatio < 0.7) score *= 0.45;
+  if (sit.workerCount < 4) score *= 0.85;
   return {
     state: 'attack',
     score,
@@ -138,14 +139,14 @@ function scoreAttack(sit: StrategicSituation): ScoredState {
 function scoreRaid(sit: StrategicSituation): ScoredState {
   let score = 0;
   if (!sit.hasProduction) return { state: 'raid', score: 0, reason: 'no barracks' };
-  if (sit.armyCount >= 3 && sit.armyRatio >= 0.75) {
-    score += 22 + sit.doctrineHarass * 28;
+  if (sit.armyCount >= 2 && sit.armyRatio >= 0.6) {
+    score += 24 + sit.doctrineHarass * 28;
   }
   if (sit.nearbyMineCount >= 1 && sit.enemyArmyCount >= 2) score += 8;
-  if (sit.primaryBridgeContested === false && sit.armyCount >= 4) score += 10;
+  if (sit.primaryBridgeContested === false && sit.armyCount >= 3) score += 10;
   if (sit.armyRatio >= 1.4) score *= 0.55; // prefer Attack when crushing
   if (sit.threatNearBase > 0) score *= 0.2;
-  if (sit.armyCount < 3) score *= 0.3;
+  if (sit.armyCount < 2) score *= 0.3;
   return {
     state: 'raid',
     score,

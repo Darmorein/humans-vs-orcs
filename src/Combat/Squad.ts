@@ -5,7 +5,8 @@ import { MORALE_DEFAULT } from './Morale';
 export type { SquadFormation } from './FormationDefs';
 export type CombatUnitType = 'Swordsman' | 'Archer' | 'Grunt' | 'SpearOrc';
 
-export const SQUAD_MAX_SIZE = 10;
+/** Soft army scaling target mid-match (~8–12). */
+export const SQUAD_MAX_SIZE = 12;
 
 export function isCombatUnitType(type: string): type is CombatUnitType {
   return (
@@ -51,6 +52,21 @@ export class Squad {
   public facingX = 0;
   public facingY = 1;
 
+  /**
+   * Intended roster size for recruited squads (reinforce target).
+   * Defaults to maxSize when unset historically.
+   */
+  public targetSize = SQUAD_MAX_SIZE;
+  /** Player-facing name (e.g. "1st Human Infantry"). */
+  public displayName = '';
+  /** SquadTemplate id when produced via recruitment. */
+  public templateId: string | null = null;
+  /**
+   * When true, auto-join from stray trains will not fill this squad.
+   * Recruit / starter squads set this so armies stay coherent products.
+   */
+  public closedToAutoJoin = false;
+
   public movementSpeed = 60;
   public attackStrength = 10;
   public defense = 0.1;
@@ -61,6 +77,19 @@ export class Squad {
   /** Last hold-position heuristic total (debug / UI). */
   public lastTacticalScore = 0;
   public lastTacticalSummary = '';
+
+  /** Shared strategic march (one path for the squad anchor). */
+  public marchActive = false;
+  public orderDestX = 0;
+  public orderDestY = 0;
+  public anchorX = 0;
+  public anchorY = 0;
+  public anchorPath: { x: number; y: number }[] = [];
+  public anchorIndex = 0;
+  /** 1 = full formation; lower = temporary column at chokes. */
+  public compressMul = 1;
+  /** Member ids temporarily released from slots (anti-stuck). */
+  public releasedSlotIds = new Set<number>();
 
   public readonly maxSize: number;
 
@@ -74,6 +103,7 @@ export class Squad {
     this.ownerPlayerId = ownerPlayerId;
     this.unitType = unitType;
     this.maxSize = maxSize;
+    this.targetSize = maxSize;
   }
 
   public get size(): number {
@@ -81,12 +111,22 @@ export class Squad {
   }
 
   public get isFull(): boolean {
-    return this.memberIds.length >= this.maxSize;
+    const cap = Math.min(this.maxSize, this.targetSize || this.maxSize);
+    return this.memberIds.length >= cap;
+  }
+
+  public get isDepleted(): boolean {
+    const cap = this.targetSize || this.maxSize;
+    return this.memberIds.length > 0 && this.memberIds.length < cap;
   }
 
   public get label(): string {
-    const base = `${squadDisplayName(this.unitType)}  ${this.size} / ${this.maxSize}`;
-    return this.routing ? `${base}  ROUT` : base;
+    const name = this.displayName || squadDisplayName(this.unitType);
+    const cap = this.targetSize || this.maxSize;
+    const base = `${name}  ${this.size} / ${cap}`;
+    if (this.routing) return `${base}  ROUT`;
+    if (this.isDepleted) return `${base}  DEPLETED`;
+    return base;
   }
 
   public centroid(unitsById: Map<number, Unit>): { x: number; y: number } | null {

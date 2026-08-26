@@ -1,11 +1,11 @@
-import type { SquadFormation } from './FormationDefs';
-import { FORMATION_DEFS } from './FormationDefs';
+import type { SquadFormation } from './FormationDefs.ts';
+import { FORMATION_DEFS } from './FormationDefs.ts';
 
 /** World-space offsets for formation slots (local +Y = forward). */
 export function formationOffsets(
   formation: SquadFormation,
   count: number,
-  baseSpacing = 28,
+  baseSpacing = 46,
 ): { x: number; y: number }[] {
   const out: { x: number; y: number }[] = [];
   if (count <= 0) return out;

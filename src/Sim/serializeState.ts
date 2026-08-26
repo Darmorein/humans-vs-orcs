@@ -21,6 +21,8 @@ import { captureIdAllocators, type IdAllocatorState } from './IdAllocators';
 import type { SettlementFocus, SettlementSpecialization } from '../Settlement/SettlementFocus';
 import type { SoftSimState } from './SoftSimState';
 import { emptySoftSimState } from './SoftSimState';
+import type { MilitaryJobSnapshot } from '../Combat/MilitaryRecruitment';
+import type { MilitaryRecruitmentSystem } from '../Combat/MilitaryRecruitment';
 
 /** Plain squad row for snapshot / hydrate (mirrors Squad fields). */
 export interface SquadSnapshot {
@@ -36,6 +38,10 @@ export interface SquadSnapshot {
   formation: SquadFormation;
   facingX: number;
   facingY: number;
+  targetSize?: number;
+  displayName?: string;
+  templateId?: string | null;
+  closedToAutoJoin?: boolean;
 }
 
 /** JSON-friendly snapshot for future netcode / replay / desync checks. */
@@ -156,6 +162,8 @@ export interface GameStateSnapshot {
   }>;
   transitCitizens?: Array<{ groupId: string; citizens: Citizen[] }>;
   squads?: SquadSnapshot[];
+  militaryJobs?: MilitaryJobSnapshot[];
+  recruitNameOrdinals?: Record<string, number>;
   heroes?: Hero[];
   artifacts?: Artifact[];
   historyEvents?: WorldEvent[];
@@ -173,6 +181,7 @@ export function serializeGameState(args: {
   settlements: SettlementSystem;
   pendingCommands: GameCommand[];
   squads?: SquadSystem;
+  recruitment?: MilitaryRecruitmentSystem;
   heroes?: HeroSystem;
   artifacts?: ArtifactSystem;
   history?: WorldHistory;
@@ -245,8 +254,14 @@ export function serializeGameState(args: {
           formation: sq.formation,
           facingX: sq.facingX,
           facingY: sq.facingY,
+          targetSize: sq.targetSize,
+          displayName: sq.displayName,
+          templateId: sq.templateId,
+          closedToAutoJoin: sq.closedToAutoJoin,
         }))
       : undefined,
+    militaryJobs: args.recruitment?.capture(),
+    recruitNameOrdinals: args.recruitment?.captureNameOrdinals(),
     heroes: args.heroes ? args.heroes.all().map((h) => cloneHero(h)) : undefined,
     artifacts: args.artifacts
       ? args.artifacts.all().map((a) => cloneArtifact(a))

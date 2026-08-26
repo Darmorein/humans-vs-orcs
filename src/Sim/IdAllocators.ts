@@ -5,6 +5,7 @@ import { getNextHeroSeq, setNextHeroSeq } from '../Heroes/HeroSystem';
 import { getNextArtifactSeq, setNextArtifactSeq } from '../Artifacts/ArtifactSystem';
 import { getNextCitizenId, setNextCitizenId } from '../Settlement/Population/PopulationSim';
 import { getNextProjectId, setNextProjectId } from '../Settlement/ConstructionQueue';
+import { getNextRecruitJobSeq, setNextRecruitJobSeq } from '../Combat/MilitaryRecruitment';
 import { getNextSettlerGroupId, setNextSettlerGroupId } from '../Settlement/SettlerGroup';
 
 /**
@@ -20,6 +21,7 @@ export interface IdAllocatorState {
   citizenNext: number;
   projectNext: number;
   settlerGroupNext: number;
+  recruitJobNext?: number;
 }
 
 export function captureIdAllocators(): IdAllocatorState {
@@ -32,6 +34,7 @@ export function captureIdAllocators(): IdAllocatorState {
     citizenNext: getNextCitizenId(),
     projectNext: getNextProjectId(),
     settlerGroupNext: getNextSettlerGroupId(),
+    recruitJobNext: getNextRecruitJobSeq(),
   };
 }
 
@@ -44,4 +47,5 @@ export function restoreIdAllocators(state: IdAllocatorState) {
   setNextCitizenId(state.citizenNext);
   setNextProjectId(state.projectNext);
   setNextSettlerGroupId(state.settlerGroupNext);
+  if (state.recruitJobNext != null) setNextRecruitJobSeq(state.recruitJobNext);
 }

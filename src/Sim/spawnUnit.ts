@@ -20,6 +20,8 @@ export interface SpawnUnitArgs {
     damage: number;
     range: number;
   };
+  /** Squad registration options (force new / prefer existing). */
+  registerOpts?: { forceNew?: boolean; preferSquadId?: string };
 }
 
 /**
@@ -31,7 +33,7 @@ export function spawnUnitRegistered(args: SpawnUnitArgs): Unit {
   const unit = new Unit(args.x, args.y, args.player, options);
   args.entities.push(unit);
   if (isCombatUnitType(unit.unitType)) {
-    args.squads.registerUnit(unit);
+    args.squads.registerUnit(unit, args.registerOpts);
   }
   return unit;
 }

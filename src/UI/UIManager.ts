@@ -32,7 +32,6 @@ import { isCombatUnitType } from '../Combat/Squad';
 import { ALL_FORMATIONS, formationLabel } from '../Combat/FormationDefs';
 import { heroTypeLabel } from '../Heroes';
 import { artifactQualityLabel, artifactTypeLabel } from '../Artifacts';
-import { getUnitDef } from '../Sim/UnitCatalog';
 import { Game } from '../Game';
 
 export class UIManager {
@@ -104,7 +103,9 @@ export class UIManager {
 
     if (selectedSquads.length > 0 && entity instanceof Unit && isCombatUnitType(entity.unitType)) {
       for (const squad of selectedSquads) {
-        infoHtml += `<h3>${squad.label}</h3>`;
+        infoHtml += `<h3>${squad.displayName || squad.label}</h3>`;
+        const cap = squad.targetSize || squad.maxSize;
+        infoHtml += `<p>${squad.size} / ${cap}${squad.isDepleted ? ' · <strong>DEPLETED</strong>' : ''}</p>`;
         infoHtml += `<p>Morale ${Math.round(squad.morale)}${squad.routing ? ' ROUT!' : ''} · XP ${Math.floor(squad.experience)} · ${formationLabel(squad.formation)}</p>`;
         if (squad.lastTacticalSummary) {
           infoHtml += `<p class="muted">Tactics ${squad.lastTacticalScore >= 0 ? '+' : ''}${squad.lastTacticalScore}: ${squad.lastTacticalSummary}</p>`;
@@ -261,6 +262,21 @@ export class UIManager {
           for (const s of selectedSquads) this.game.setSquadFormation(s.id, f);
         });
       }
+      for (const squad of selectedSquads) {
+        if (!squad.isDepleted) continue;
+        const why = this.game.reinforceSquadBlockReason(squad.id);
+        this.createButton(
+          why ? `Reinforce — ${why}` : `Reinforce (${squad.size} → ${squad.targetSize || squad.maxSize})`,
+          true,
+          () => {
+            if (why) {
+              this.game.showBuildFeedback(why);
+              return;
+            }
+            this.game.reinforceSquad(squad.id);
+          },
+        );
+      }
       if (entity.artifactId) {
         this.createButton('Unequip Artifact', true, () => this.game.unequipSelectedArtifact());
       }
@@ -404,66 +420,45 @@ export class UIManager {
         this.actionButtonsDiv.appendChild(hint);
       }
 
+      this.renderMilitaryRecruitment();
       this.renderQueueControls(settlement);
     } else if (entity instanceof Building && entity.buildingType === faction.productionBuilding) {
       if (!entity.isConstructed) return;
-      const meleeDef = getUnitDef(faction.meleeType);
-      const rangedDef = getUnitDef(faction.rangedType);
-      const meleeCost = meleeDef?.goldCost ?? 80;
-      const rangedCost = rangedDef?.goldCost ?? 100;
-      const meleePop = meleeDef?.populationCost ?? 1;
-      const rangedPop = rangedDef?.populationCost ?? 1;
-      const cit = settlement?.population ?? 0;
-      this.createButton(
-        gold >= meleeCost && cit >= meleePop
-          ? `Train ${faction.meleeType} (${meleeCost}G + ${meleePop} cit)`
-          : `Train ${faction.meleeType} — ${[
-              gold < meleeCost ? `Need ${meleeCost - Math.floor(gold)}G` : null,
-              cit < meleePop ? `Need ${meleePop - cit} cit` : null,
-            ]
-              .filter(Boolean)
-              .join(', ')}`,
-        true,
-        () => {
-          if (gold < meleeCost || cit < meleePop) {
-            this.game.showBuildFeedback(
-              `Cannot train ${faction.meleeType}: ${[
-                gold < meleeCost ? `Need ${meleeCost - Math.floor(gold)}G` : null,
-                cit < meleePop ? `Need ${meleePop - cit} citizens` : null,
-              ]
-                .filter(Boolean)
-                .join(', ')}`,
-            );
-            return;
-          }
-          this.game.trainUnit(entity, faction.meleeType);
-        },
-      );
-      this.createButton(
-        gold >= rangedCost && cit >= rangedPop
-          ? `Train ${faction.rangedType} (${rangedCost}G + ${rangedPop} cit)`
-          : `Train ${faction.rangedType} — ${[
-              gold < rangedCost ? `Need ${rangedCost - Math.floor(gold)}G` : null,
-              cit < rangedPop ? `Need ${rangedPop - cit} cit` : null,
-            ]
-              .filter(Boolean)
-              .join(', ')}`,
-        true,
-        () => {
-          if (gold < rangedCost || cit < rangedPop) {
-            this.game.showBuildFeedback(
-              `Cannot train ${faction.rangedType}: ${[
-                gold < rangedCost ? `Need ${rangedCost - Math.floor(gold)}G` : null,
-                cit < rangedPop ? `Need ${rangedPop - cit} citizens` : null,
-              ]
-                .filter(Boolean)
-                .join(', ')}`,
-            );
-            return;
-          }
-          this.game.trainUnit(entity, faction.rangedType);
-        },
-      );
+      this.renderMilitaryRecruitment();
+    }
+  }
+
+  /** City / Barracks: recruit complete squads + military queue. */
+  private renderMilitaryRecruitment() {
+    const templates = this.game.listSquadTemplatesForLocal();
+    for (const t of templates) {
+      const why = this.game.recruitSquadBlockReason(t.id);
+      const label = why
+        ? `Recruit ${t.displayName} — ${why}`
+        : `Recruit ${t.displayName} (${t.treasuryCost}T + ${t.manpowerCost} cit · ${t.trainTime}s)`;
+      this.createButton(label, true, () => {
+        if (why) {
+          this.game.showBuildFeedback(why);
+          return;
+        }
+        this.game.recruitSquad(t.id);
+      });
+    }
+    const queue = this.game.listMilitaryQueue();
+    if (queue.length > 0) {
+      const box = document.createElement('div');
+      box.className = 'queue-hint';
+      box.innerHTML = '<strong>MILITARY QUEUE</strong>';
+      for (const job of queue) {
+        const left = Math.max(0, job.trainTime - job.progress);
+        const row = document.createElement('div');
+        row.textContent =
+          job.kind === 'reinforce'
+            ? `Reinforce ${job.displayName} · ${left.toFixed(1)}s · +${job.membersNeeded}`
+            : `${job.displayName} · ${left.toFixed(1)}s · ${job.membersNeeded} soldiers`;
+        box.appendChild(row);
+      }
+      this.actionButtonsDiv.appendChild(box);
     }
   }
 
