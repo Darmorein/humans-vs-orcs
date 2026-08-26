@@ -29,7 +29,7 @@ export function buildingSpriteKey(
     case 'Fort':
       return factionId === 'orcs' ? 'orc/stronghold' : 'human/town-hall';
     case 'Outpost':
-      return factionId === 'orcs' ? 'orc/spike-tower' : 'human/watchtower';
+      return factionId === 'orcs' ? 'orc/outpost' : 'human/outpost';
     case 'Temple':
       return factionId === 'orcs' ? 'orc/war-hut' : 'human/watchtower';
     case 'Market':

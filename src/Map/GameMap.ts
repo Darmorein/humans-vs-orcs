@@ -401,6 +401,7 @@ function terrainSpriteKey(type: TerrainType): AssetKey | null {
     case 'denseForest':
       return 'terrain/grass';
     case 'hill':
+      return 'world/hill';
     case 'stone':
     case 'iron':
       return 'terrain/dirt';
@@ -410,6 +411,7 @@ function terrainSpriteKey(type: TerrainType): AssetKey | null {
     case 'deepWater':
       return 'terrain/water';
     case 'bridge':
+      return 'world/bridge';
     case 'road':
       return 'terrain/path-straight';
     case 'gold':
