@@ -35,6 +35,14 @@ export class PopulationSim {
     | ((from: Settlement, to: Settlement, citizenId: string) => void)
     | null = null;
 
+  public getAccum(): number {
+    return this.accum;
+  }
+
+  public setAccum(v: number) {
+    this.accum = Math.max(0, v);
+  }
+
   /** Seed starting villagers when a settlement first gets a town center. */
   public seedIfEmpty(s: Settlement, factionId: FactionId, count = 8) {
     if (s.citizens.length > 0) return;

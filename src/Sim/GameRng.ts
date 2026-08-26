@@ -15,6 +15,11 @@ export class GameRng {
     return this.rng.next();
   }
 
+  /** Alias for next() — [0, 1). */
+  nextFloat(): number {
+    return this.next();
+  }
+
   range(min: number, max: number): number {
     return this.rng.range(min, max);
   }
@@ -23,12 +28,30 @@ export class GameRng {
     return this.rng.int(min, maxInclusive);
   }
 
+  /** Inclusive integer range (API alias). */
+  nextInt(min: number, maxInclusive: number): number {
+    return this.int(min, maxInclusive);
+  }
+
   chance(p: number): boolean {
     return this.rng.chance(p);
   }
 
   pick<T>(arr: T[]): T {
     return this.rng.pick(arr);
+  }
+
+  /**
+   * Deterministic substream derived from current state + stream name.
+   * Does not advance this RNG (forks via hashed seed).
+   */
+  fork(streamName: string): GameRng {
+    let h = this.getState() >>> 0;
+    for (let i = 0; i < streamName.length; i++) {
+      h ^= streamName.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return new GameRng((h >>> 0) || 1);
   }
 
   /** Angle in radians [0, TAU). */

@@ -18,6 +18,8 @@ import type { GameRng } from './GameRng';
 import { GAME_STATE_VERSION } from './SimClock';
 import type { GameCommand } from './Commands';
 import { captureIdAllocators, type IdAllocatorState } from './IdAllocators';
+import type { SoftSimState } from './SoftSimState';
+import { emptySoftSimState } from './SoftSimState';
 
 /** Plain squad row for snapshot / hydrate (mirrors Squad fields). */
 export interface SquadSnapshot {
@@ -78,6 +80,26 @@ export interface GameStateSnapshot {
     killCount?: number;
     isHero?: boolean;
     heroName?: string | null;
+    heldGold?: number;
+    leaguesWalked?: number;
+    structuresRaised?: number;
+    settlementsFounded?: number;
+    settlerGroupId?: string | null;
+    targetX?: number | null;
+    targetY?: number | null;
+    facingX?: number;
+    facingY?: number;
+    gatherTargetId?: number | null;
+    buildTargetId?: number | null;
+    attackTargetId?: number | null;
+    attackTimer?: number;
+    gatherTimer?: number;
+    holdGround?: boolean;
+    isRouting?: boolean;
+    agentTraits?: string[];
+    careerLog?: string[];
+    path?: Array<{ x: number; y: number }>;
+    pathIndex?: number;
   }>;
   settlements: Array<{
     id: string;
@@ -103,6 +125,8 @@ export interface GameStateSnapshot {
   artifacts?: Artifact[];
   historyEvents?: WorldEvent[];
   pendingCommands: GameCommand[];
+  /** Soft timers / AI phase for mid-game resume fidelity. */
+  softState?: SoftSimState;
 }
 
 export function serializeGameState(args: {
@@ -117,6 +141,7 @@ export function serializeGameState(args: {
   heroes?: HeroSystem;
   artifacts?: ArtifactSystem;
   history?: WorldHistory;
+  softState?: SoftSimState;
 }): GameStateSnapshot {
   return {
     version: GAME_STATE_VERSION,
@@ -180,6 +205,7 @@ export function serializeGameState(args: {
       ? args.history.all().map((e) => cloneWorldEvent(e))
       : undefined,
     pendingCommands: args.pendingCommands.map((c) => ({ ...c })),
+    softState: args.softState ?? emptySoftSimState(),
   };
 }
 
@@ -194,6 +220,7 @@ function serializeEntity(e: Entity): GameStateSnapshot['entities'][number] {
     factionId: String(e.factionId),
   };
   if (e instanceof Unit) {
+    const rt = e.captureRuntime();
     return {
       ...base,
       kind: 'unit' as const,
@@ -206,6 +233,7 @@ function serializeEntity(e: Entity): GameStateSnapshot['entities'][number] {
       killCount: e.killCount,
       isHero: e.isHero,
       heroName: e.heroName,
+      ...rt,
     };
   }
   if (e instanceof Building) {

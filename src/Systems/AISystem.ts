@@ -64,6 +64,44 @@ export class AISystem {
     this.playerId = playerId;
   }
 
+  public captureSoftState(): import('../Sim/SoftSimState').AiSoftState {
+    return {
+      playerId: this.playerId,
+      state: this.state,
+      stateReason: this.stateReason,
+      secondsInState: this.secondsInState,
+      elapsed: this.elapsed,
+      thinkTimer: this.thinkTimer,
+      actionTimer: this.actionTimer,
+      nextActionIn: this.nextActionIn,
+      expansionCooldown: this.expansionCooldown,
+      guardIds: [...this.guardIds],
+      assaultIds: [...this.assaultIds],
+      harassIds: [...this.harassIds],
+      pendingTargetId: [...this.pendingTargetId.entries()].map(([unitId, targetId]) => ({
+        unitId,
+        targetId,
+      })),
+      assaultStartCount: this.assaultStartCount,
+    };
+  }
+
+  public restoreSoftState(s: import('../Sim/SoftSimState').AiSoftState) {
+    this.state = s.state as StrategicState;
+    this.stateReason = s.stateReason;
+    this.secondsInState = s.secondsInState;
+    this.elapsed = s.elapsed;
+    this.thinkTimer = s.thinkTimer;
+    this.actionTimer = s.actionTimer;
+    this.nextActionIn = s.nextActionIn;
+    this.expansionCooldown = s.expansionCooldown;
+    this.guardIds = new Set(s.guardIds);
+    this.assaultIds = new Set(s.assaultIds);
+    this.harassIds = new Set(s.harassIds);
+    this.pendingTargetId = new Map(s.pendingTargetId.map((p) => [p.unitId, p.targetId]));
+    this.assaultStartCount = s.assaultStartCount;
+  }
+
   public update(
     dt: number,
     entities: Entity[],

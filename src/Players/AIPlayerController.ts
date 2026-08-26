@@ -1,5 +1,6 @@
 import type { GameContext, PlayerController } from './PlayerController';
 import { AISystem } from '../Systems/AISystem';
+import type { AiSoftState } from '../Sim/SoftSimState';
 
 /** AI seat: drives one PlayerState via faction-aware AISystem. */
 export class AIPlayerController implements PlayerController {
@@ -31,5 +32,13 @@ export class AIPlayerController implements PlayerController {
 
   getStrategicReason(): string {
     return this.ai.getStrategicReason();
+  }
+
+  captureSoftState(): AiSoftState {
+    return this.ai.captureSoftState();
+  }
+
+  restoreSoftState(s: AiSoftState) {
+    this.ai.restoreSoftState(s);
   }
 }

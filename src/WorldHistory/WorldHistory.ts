@@ -81,6 +81,21 @@ export class WorldHistory {
     this.notify();
   }
 
+  public captureSoftTimers(): { elapsed: number; territoryCheckTimer: number } {
+    return { elapsed: this.elapsed, territoryCheckTimer: this.territoryCheckTimer };
+  }
+
+  public restoreSoftTimers(elapsed: number, territoryCheckTimer: number) {
+    this.elapsed = elapsed;
+    this.territoryCheckTimer = territoryCheckTimer;
+  }
+
+  /** Clear ephemeral battle/migration buffers (not snapshotted). */
+  public clearEphemeralClusters() {
+    this.battleClusters = [];
+    this.migrationBuckets = [];
+  }
+
   public onChange(fn: () => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);

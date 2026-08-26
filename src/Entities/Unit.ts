@@ -92,6 +92,94 @@ export class Unit extends Entity {
   /** Last map seen in update — used for tactical takeDamage. */
   private lastGameMap: GameMap | null = null;
 
+  /** Snapshot mid-order / career fields for save/load. */
+  public captureRuntime() {
+    return {
+      heldGold: this.heldGold,
+      leaguesWalked: this.leaguesWalked,
+      structuresRaised: this.structuresRaised,
+      settlementsFounded: this.settlementsFounded,
+      settlerGroupId: this.settlerGroupId,
+      targetX: this.targetX,
+      targetY: this.targetY,
+      facingX: this.facingX,
+      facingY: this.facingY,
+      gatherTargetId: this.gatherTarget?.id ?? null,
+      buildTargetId: this.buildTarget?.id ?? null,
+      attackTargetId: this.targetEntity?.id ?? null,
+      attackTimer: this.attackTimer,
+      gatherTimer: this.gatherTimer,
+      holdGround: this.holdGround,
+      isRouting: this.isRouting,
+      agentTraits: [...this.agentTraits],
+      careerLog: [...this.careerLog],
+      path: this.path.map((p) => ({ x: p.x, y: p.y })),
+      pathIndex: this.pathIndex,
+    };
+  }
+
+  public restoreRuntime(
+    rt: {
+      heldGold?: number;
+      leaguesWalked?: number;
+      structuresRaised?: number;
+      settlementsFounded?: number;
+      settlerGroupId?: string | null;
+      targetX?: number | null;
+      targetY?: number | null;
+      facingX?: number;
+      facingY?: number;
+      attackTimer?: number;
+      gatherTimer?: number;
+      holdGround?: boolean;
+      isRouting?: boolean;
+      agentTraits?: import('../Heroes/Types').AgentTrait[];
+      careerLog?: string[];
+      path?: Array<{ x: number; y: number }>;
+      pathIndex?: number;
+    },
+    resolve: (id: number) => Entity | null,
+    gatherTargetId?: number | null,
+    buildTargetId?: number | null,
+    attackTargetId?: number | null,
+  ) {
+    if (rt.heldGold != null) this.heldGold = rt.heldGold;
+    if (rt.leaguesWalked != null) this.leaguesWalked = rt.leaguesWalked;
+    if (rt.structuresRaised != null) this.structuresRaised = rt.structuresRaised;
+    if (rt.settlementsFounded != null) this.settlementsFounded = rt.settlementsFounded;
+    if (rt.settlerGroupId !== undefined) this.settlerGroupId = rt.settlerGroupId;
+    if (rt.targetX !== undefined) this.targetX = rt.targetX;
+    if (rt.targetY !== undefined) this.targetY = rt.targetY;
+    if (rt.facingX != null) this.facingX = rt.facingX;
+    if (rt.facingY != null) this.facingY = rt.facingY;
+    if (rt.attackTimer != null) this.attackTimer = rt.attackTimer;
+    if (rt.gatherTimer != null) this.gatherTimer = rt.gatherTimer;
+    if (rt.holdGround != null) this.holdGround = rt.holdGround;
+    if (rt.isRouting != null) this.isRouting = rt.isRouting;
+    if (rt.agentTraits) this.agentTraits = [...rt.agentTraits];
+    if (rt.careerLog) this.careerLog = [...rt.careerLog];
+    if (rt.path) {
+      this.path = rt.path.map((p) => ({ x: p.x, y: p.y }));
+      this.pathIndex = rt.pathIndex ?? 0;
+    }
+
+    if (gatherTargetId != null) {
+      const t = resolve(gatherTargetId);
+      if (t) this.gatherTarget = t;
+    }
+    if (buildTargetId != null) {
+      const t = resolve(buildTargetId);
+      if (t) this.buildTarget = t;
+    }
+    if (attackTargetId != null) {
+      const t = resolve(attackTargetId);
+      if (t) {
+        this.targetEntity = t;
+        this.orderTarget = t;
+      }
+    }
+  }
+
   constructor(x: number, y: number, owner: PlayerState, options: any) {
     const unitType = (options.unitType ||
       (owner.factionId === 'humans' ? 'Worker' : 'Grunt')) as Unit['unitType'];

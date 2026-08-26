@@ -53,12 +53,14 @@ import {
   serializeGameState,
   writeSaveToStorage,
   DEFAULT_SAVE_SLOT,
+  type AiVsAiDeterminismResult,
   type DeterminismTestResult,
   type GameCommand,
   type GameStateSnapshot,
   type ReplayManifest,
   type SaveGame,
 } from './Sim';
+import { compareAiVsAiHashes, diffSnapshotHints } from './Sim/determinismTest';
 import { spawnUnitNearBuilding, spawnUnitRegistered } from './Sim/spawnUnit';
 import { PVP_COMMAND_DELAY_TICKS, type PvpSession } from './Net';
 
@@ -125,7 +127,7 @@ export class Game {
   private lastStateHash = '—';
   private pvpRemoteHash: string | null = null;
   private pvpLastCompareTick: number | null = null;
-  private static readonly PVP_HASH_INTERVAL = 90;
+  private static readonly PVP_HASH_INTERVAL = 120;
 
   constructor(options?: number | GameOptions) {
     const opts: GameOptions =
@@ -265,7 +267,58 @@ export class Game {
     this.gameState = wasPlaying;
     const result = compareSaveLoadHashes(this.seed, n, m, afterContinue, afterReload);
     console.info('[Determinism]', result);
+    if (result.mismatchHints?.length) {
+      console.warn('[Determinism] hints', result.mismatchHints);
+    }
     return result;
+  }
+
+  /**
+   * AI vs AI twin run from a boot snapshot: N ticks twice → hashes must match.
+   * Both legs start from the same hydrated boot (avoids construct-vs-hydrate skew).
+   */
+  public runAiVsAiDeterminismTest(ticks = 600): AiVsAiDeterminismResult {
+    const wasPlaying = this.gameState;
+    this.gameState = 'playing';
+    const boot = buildSaveGame({
+      seed: this.seed,
+      simTick: this.simTick,
+      snapshot: this.exportStateSnapshot(),
+      replayCommands: this.replayRecorder.getCommands(),
+    });
+    // Normalize to hydrated boot before both legs.
+    this.applySave(boot);
+    for (let i = 0; i < ticks; i++) this.debugSimTick();
+    const snapA = this.exportStateSnapshot();
+    this.applySave(boot);
+    for (let i = 0; i < ticks; i++) this.debugSimTick();
+    const snapB = this.exportStateSnapshot();
+    this.gameState = wasPlaying;
+    const result = compareAiVsAiHashes(this.seed, ticks, snapA, snapB);
+    console.info('[AiVsAiDeterminism]', result);
+    if (result.mismatchHints?.length) {
+      console.warn('[AiVsAiDeterminism] hints', result.mismatchHints);
+    }
+    return result;
+  }
+
+  /** Snapshot round-trip: export → hydrate → export must match (lossy serialize detector). */
+  public runSnapshotRoundTripTest(): { ok: boolean; hashA: string; hashB: string; hints?: string[] } {
+    const a = this.exportStateSnapshot();
+    const save = buildSaveGame({
+      seed: this.seed,
+      simTick: this.simTick,
+      snapshot: a,
+      replayCommands: this.replayRecorder.getCommands(),
+    });
+    this.applySave(save);
+    const b = this.exportStateSnapshot();
+    const hashA = hashGameSnapshot(a);
+    const hashB = hashGameSnapshot(b);
+    const ok = hashA === hashB;
+    const hints = ok ? undefined : diffSnapshotHints(a, b);
+    console.info('[SnapshotRoundTrip]', ok ? 'PASS' : 'FAIL', { hashA, hashB, hints });
+    return { ok, hashA, hashB, hints };
   }
 
   /** Advance one sim tick without frame/input (tests). */
@@ -340,7 +393,29 @@ export class Game {
       heroes: this.heroSystem,
       artifacts: this.artifactSystem,
       history: this.worldHistory,
+      softState: this.captureSoftSimState(),
     });
+  }
+
+  private captureSoftSimState() {
+    const hero = this.heroSystem.captureSoftTimers();
+    const art = this.artifactSystem.captureSoftTimers();
+    const hist = this.worldHistory.captureSoftTimers();
+    const ai = this.controllers
+      .filter((c): c is AIPlayerController => c instanceof AIPlayerController)
+      .map((c) => c.captureSoftState());
+    return {
+      populationAccum: populationSim.getAccum(),
+      heroElapsed: hero.elapsed,
+      heroEvalTimer: hero.evalTimer,
+      artifactElapsed: art.elapsed,
+      artifactForgeTimer: art.forgeTimer,
+      artifactForgeCooldowns: art.forgeCooldowns,
+      historyElapsed: hist.elapsed,
+      historyTerritoryTimer: hist.territoryCheckTimer,
+      influenceAccum: this.influenceMap.getAccum(),
+      ai,
+    };
   }
 
   /**
@@ -404,6 +479,14 @@ export class Game {
         this.simTick = t;
       },
       unitOptions: (type) => this.unitOptions(type),
+      restoreAiSoft: (rows) => {
+        for (const row of rows) {
+          const ctrl = this.controllers.find(
+            (c) => c instanceof AIPlayerController && c.playerId === row.playerId,
+          ) as AIPlayerController | undefined;
+          ctrl?.restoreSoftState(row);
+        }
+      },
     });
 
     this.replayRecorder.restore(
@@ -417,6 +500,9 @@ export class Game {
     }
 
     this.influenceMap.rebuild(this.settlementSystem.all(), this.match);
+    if (save.snapshot.softState) {
+      this.influenceMap.setAccum(save.snapshot.softState.influenceAccum);
+    }
     this.fog.update(this.entities, this.gameMap, this.match.localPlayerId);
     console.info(
       `[Load] tick=${this.simTick} entities=${this.entities.length} cmdsLogged=${save.replay.commands.length}`,
@@ -676,8 +762,10 @@ export class Game {
           const local = this.computeStateHash();
           this.lastStateHash = local;
           if (local !== hash) {
+            const recent = this.replayRecorder.getCommands().slice(-12);
             console.error(
-              `[DESYNC DETECTED] tick~${tick} local=${local} remote=${hash} simTick=${this.simTick}`,
+              `[DESYNC DETECTED]\ntick: ${tick}\nlocal: ${local}\nremote: ${hash}\nsimTick: ${this.simTick}`,
+              recent,
             );
           }
         }
@@ -700,16 +788,31 @@ export class Game {
 
   private collectDiagnostics() {
     const units = this.entities.filter((e) => e instanceof Unit && !e.isDead).length;
+    let determinismStatus = 'skirmish';
+    if (this.pvpSession) {
+      if (
+        this.pvpRemoteHash &&
+        this.lastStateHash !== '—' &&
+        this.pvpRemoteHash !== this.lastStateHash
+      ) {
+        determinismStatus = 'DESYNC';
+      } else if (this.pvpRemoteHash) {
+        determinismStatus = 'SYNCED';
+      } else {
+        determinismStatus = 'pvp-waiting';
+      }
+    }
     return {
       simTick: this.simTick,
       seed: this.seed,
       rngState: this.simRng.getState(),
       entityCount: this.entities.filter((e) => !e.isDead).length,
       unitCount: units,
+      squadCount: this.squadSystem.all().length,
       settlementCount: this.settlementSystem.all().length,
       commandQueueLength: this.commandQueue.length,
       lastStateHash: this.lastStateHash === '—' ? this.computeStateHash() : this.lastStateHash,
-      determinismStatus: this.pvpSession ? 'pvp-hash' : 'skirmish',
+      determinismStatus,
       pvpLocalHash: this.pvpSession ? this.lastStateHash : undefined,
       pvpRemoteHash: this.pvpRemoteHash ?? undefined,
       pvpLastCompareTick: this.pvpLastCompareTick ?? undefined,

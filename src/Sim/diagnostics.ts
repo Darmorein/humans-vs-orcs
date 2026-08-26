@@ -7,6 +7,7 @@ export interface SimDiagnosticsData {
   rngState: number;
   entityCount: number;
   unitCount: number;
+  squadCount?: number;
   settlementCount: number;
   commandQueueLength: number;
   lastStateHash: string;
@@ -37,7 +38,7 @@ export function mountSimDiagnostics(getData: () => SimDiagnosticsData): () => vo
     borderRadius: '4px',
     border: '1px solid rgba(255,255,255,0.12)',
     pointerEvents: 'none',
-    maxWidth: '360px',
+    maxWidth: '380px',
     whiteSpace: 'pre-wrap',
   } as CSSStyleDeclaration);
   document.body.appendChild(el);
@@ -46,14 +47,22 @@ export function mountSimDiagnostics(getData: () => SimDiagnosticsData): () => vo
   const tick = () => {
     const d = getData();
     const lines = [
-      `tick ${d.simTick}  seed ${d.seed}`,
-      `rng ${d.rngState}  hash ${d.lastStateHash}`,
-      `ent ${d.entityCount}  units ${d.unitCount}  settlements ${d.settlementCount}`,
-      `queue ${d.commandQueueLength}  ${d.determinismStatus}`,
+      `SIM  tick ${d.simTick}  seed ${d.seed}`,
+      `rng ${d.rngState}`,
+      `ent ${d.entityCount}  units ${d.unitCount}  squads ${d.squadCount ?? '—'}  settlements ${d.settlementCount}`,
+      `queue ${d.commandQueueLength}`,
+      `hash ${d.lastStateHash}`,
+      `determinism ${d.determinismStatus}`,
     ];
     if (d.pvpLocalHash != null) {
+      const synced =
+        d.pvpRemoteHash && d.pvpLocalHash === d.pvpRemoteHash
+          ? 'SYNCED'
+          : d.pvpRemoteHash
+            ? 'DESYNC'
+            : 'waiting';
       lines.push(
-        `pvp local ${d.pvpLocalHash}  remote ${d.pvpRemoteHash ?? '—'}  @${d.pvpLastCompareTick ?? '—'}`,
+        `pvp local ${d.pvpLocalHash}  remote ${d.pvpRemoteHash ?? '—'}  @${d.pvpLastCompareTick ?? '—'}  ${synced}`,
       );
     }
     el.textContent = lines.join('\n');

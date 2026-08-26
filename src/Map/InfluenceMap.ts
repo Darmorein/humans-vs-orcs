@@ -79,6 +79,14 @@ export class InfluenceMap {
     this.rebuild(settlements, match);
   }
 
+  public getAccum(): number {
+    return this.accum;
+  }
+
+  public setAccum(v: number) {
+    this.accum = Math.max(0, v);
+  }
+
   /** Force immediate rebuild (e.g. after load). */
   public rebuild(settlements: Settlement[], match: MatchState) {
     this.byFaction.humans.fill(0);

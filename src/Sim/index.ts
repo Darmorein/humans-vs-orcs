@@ -43,9 +43,15 @@ export {
   type SaveGame,
 } from './SaveGame';
 export { hydrateFromSnapshot } from './hydrateState';
-export { hashGameSnapshot, hashString, type SimulationStateHash } from './stateHash';
-export { compareSaveLoadHashes, type DeterminismTestResult } from './determinismTest';
+export { hashGameSnapshot, hashString, stableStringifyForDiff, type SimulationStateHash } from './stateHash';
+export {
+  compareSaveLoadHashes,
+  compareAiVsAiHashes,
+  type DeterminismTestResult,
+  type AiVsAiDeterminismResult,
+} from './determinismTest';
 export { mountSimDiagnostics, type SimDiagnosticsData } from './diagnostics';
 export { getUnitDef, unitSpawnOptions, allUnitDefs } from './UnitCatalog';
 export { spawnUnitRegistered, spawnUnitNearBuilding } from './spawnUnit';
 export { captureIdAllocators, restoreIdAllocators, type IdAllocatorState } from './IdAllocators';
+export type { SoftSimState, AiSoftState } from './SoftSimState';

@@ -81,6 +81,15 @@ export class HeroSystem {
     }
   }
 
+  public captureSoftTimers(): { elapsed: number; evalTimer: number } {
+    return { elapsed: this.elapsed, evalTimer: this.evalTimer };
+  }
+
+  public restoreSoftTimers(elapsed: number, evalTimer: number) {
+    this.elapsed = elapsed;
+    this.evalTimer = evalTimer;
+  }
+
   public update(
     dt: number,
     entities: Entity[],

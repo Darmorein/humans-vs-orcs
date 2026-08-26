@@ -16,13 +16,24 @@ export function hashString(input: string): string {
 }
 
 function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (value === null || typeof value !== 'object') {
+    if (typeof value === 'number' && Number.isFinite(value) && !Number.isInteger(value)) {
+      // Quash sub-pixel sim drift (collision / path) for desync hashing.
+      return JSON.stringify(Math.round(value * 4) / 4);
+    }
+    return JSON.stringify(value);
+  }
   if (Array.isArray(value)) {
     return `[${value.map((v) => stableStringify(v)).join(',')}]`;
   }
   const obj = value as Record<string, unknown>;
   const keys = Object.keys(obj).sort();
   return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
+}
+
+/** Exported for mismatch diagnostics (same canonical rules as hash). */
+export function stableStringifyForDiff(value: unknown): string {
+  return stableStringify(value);
 }
 
 /**
@@ -43,6 +54,11 @@ export function hashGameSnapshot(snap: GameStateSnapshot): string {
     artifacts: snap.artifacts
       ? [...snap.artifacts].sort((a, b) => a.id.localeCompare(b.id))
       : [],
+    historyEvents: snap.historyEvents
+      ? [...snap.historyEvents].sort((a, b) => a.id.localeCompare(b.id))
+      : [],
+    softState: snap.softState ?? null,
+    pendingCommands: snap.pendingCommands,
   };
   return hashString(stableStringify(canonical));
 }

@@ -28,7 +28,10 @@ async function bootGame(target: BootTarget) {
     const seedFromUrl = seedParam ? Number(seedParam) : undefined;
     const seed =
       target.seed ?? (Number.isFinite(seedFromUrl) ? seedFromUrl : undefined);
-    const bothAi = params.get('aiVai') === '1' || params.get('aivsai') === '1';
+    const bothAi =
+      params.get('aiVai') === '1' ||
+      params.get('aivsai') === '1' ||
+      params.get('aiDetTest') === '1';
     game = new Game({
       seed,
       localFaction: target.localFaction,
@@ -36,9 +39,25 @@ async function bootGame(target: BootTarget) {
     });
   }
 
+  // Determinism harnesses run before the frame loop so wall-clock frames don't pollute ticks.
+  if (params.get('aiDetTest') === '1') {
+    const ticks = Number(params.get('ticks') ?? 600);
+    const result = game.runAiVsAiDeterminismTest(Number.isFinite(ticks) ? ticks : 600);
+    console.info('[AiVsAiDeterminismTest]', result.ok ? 'PASS' : 'FAIL', result);
+  }
+  if (params.get('detTest') === '1' && params.get('aiDetTest') !== '1') {
+    const n = Number(params.get('n') ?? 90);
+    const m = Number(params.get('m') ?? 90);
+    const result = game.runSaveLoadDeterminismTest(
+      Number.isFinite(n) ? n : 90,
+      Number.isFinite(m) ? m : 90,
+    );
+    console.info('[DeterminismTest]', result.ok ? 'PASS' : 'FAIL', result);
+  }
+
   game.start();
 
-  if (params.get('debug') === '1' || params.get('detTest') === '1') {
+  if (params.get('debug') === '1' || params.get('detTest') === '1' || params.get('aiDetTest') === '1') {
     (window as unknown as { __game?: Game }).__game = game;
   }
 
@@ -78,19 +97,6 @@ async function bootGame(target: BootTarget) {
     const ok = MapGenerator.assertDeterministic(game.seed);
     console.info(`[WorldGen] determinism seed=${game.seed}: ${ok ? 'OK' : 'FAIL'}`);
   }
-
-  if (params.get('detTest') === '1') {
-    const n = Number(params.get('n') ?? 90);
-    const m = Number(params.get('m') ?? 90);
-    // Defer so first frames can settle
-    setTimeout(() => {
-      const result = game.runSaveLoadDeterminismTest(
-        Number.isFinite(n) ? n : 90,
-        Number.isFinite(m) ? m : 90,
-      );
-      console.info('[DeterminismTest]', result.ok ? 'PASS' : 'FAIL', result);
-    }, 500);
-  }
 }
 
 async function boot() {
@@ -103,7 +109,7 @@ async function boot() {
   if (loading) loading.remove();
 
   const params = new URLSearchParams(window.location.search);
-  if (params.get('aiVai') === '1' || params.get('skirmish') === '1') {
+  if (params.get('aiVai') === '1' || params.get('skirmish') === '1' || params.get('aiDetTest') === '1' || params.get('detTest') === '1') {
     void bootGame({
       kind: 'skirmish',
       localFaction: params.get('faction') === 'orcs' ? 'orcs' : 'humans',

@@ -70,6 +70,34 @@ export class ArtifactSystem {
     }
   }
 
+  public captureSoftTimers(): {
+    elapsed: number;
+    forgeTimer: number;
+    forgeCooldowns: Array<{ settlementId: string; remaining: number }>;
+  } {
+    return {
+      elapsed: this.elapsed,
+      forgeTimer: this.forgeTimer,
+      forgeCooldowns: [...this.forgeCooldown.entries()].map(([settlementId, remaining]) => ({
+        settlementId,
+        remaining,
+      })),
+    };
+  }
+
+  public restoreSoftTimers(
+    elapsed: number,
+    forgeTimer: number,
+    forgeCooldowns: Array<{ settlementId: string; remaining: number }>,
+  ) {
+    this.elapsed = elapsed;
+    this.forgeTimer = forgeTimer;
+    this.forgeCooldown.clear();
+    for (const row of forgeCooldowns) {
+      this.forgeCooldown.set(row.settlementId, row.remaining);
+    }
+  }
+
   public getForUnit(unitId: number): Artifact | undefined {
     return this.all().find((a) => !a.lost && a.boundUnitId === unitId);
   }

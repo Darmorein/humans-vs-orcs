@@ -12,6 +12,8 @@ import type { WorldHistory } from '../WorldHistory/WorldHistory';
 import type { GameRng } from './GameRng';
 import type { GameStateSnapshot } from './serializeState';
 import { restoreIdAllocators } from './IdAllocators';
+import { populationSim } from '../Settlement/Population/PopulationSim';
+import type { SoftSimState } from './SoftSimState';
 
 export interface HydrateTarget {
   entities: Entity[];
@@ -30,6 +32,8 @@ export interface HydrateTarget {
   heroes?: HeroSystem;
   artifacts?: ArtifactSystem;
   history?: WorldHistory;
+  /** Optional restore of AI controller soft timers. */
+  restoreAiSoft?: (rows: SoftSimState['ai']) => void;
 }
 
 /**
@@ -120,6 +124,25 @@ export function hydrateFromSnapshot(snap: GameStateSnapshot, target: HydrateTarg
     }
   }
 
+  // Second pass: wire unit order targets now that all entities exist.
+  const byId = new Map<number, Entity>();
+  for (const ent of target.entities) byId.set(ent.id, ent);
+  for (const e of snap.entities) {
+    if (e.kind !== 'unit') continue;
+    const u = byId.get(e.id);
+    if (!(u instanceof Unit)) continue;
+    u.restoreRuntime(
+      {
+        ...e,
+        agentTraits: e.agentTraits as import('../Heroes/Types').AgentTrait[] | undefined,
+      },
+      (id: number) => byId.get(id) ?? null,
+      e.gatherTargetId,
+      e.buildTargetId,
+      e.attackTargetId,
+    );
+  }
+
   target.settlements.hydrateFromSnapshot(snap.settlements, target.match);
 
   if (hasSquadSnap && snap.squads) {
@@ -134,8 +157,28 @@ export function hydrateFromSnapshot(snap: GameStateSnapshot, target: HydrateTarg
     target.artifacts.replaceAll(snap.artifacts);
   }
 
-  if (target.history && snap.historyEvents) {
+    if (target.history && snap.historyEvents) {
     target.history.replaceEvents(snap.historyEvents);
+  }
+
+  if (snap.softState) {
+    const soft = snap.softState;
+    populationSim.setAccum(soft.populationAccum);
+    if (target.heroes) {
+      target.heroes.restoreSoftTimers(soft.heroElapsed, soft.heroEvalTimer);
+    }
+    if (target.artifacts) {
+      target.artifacts.restoreSoftTimers(
+        soft.artifactElapsed,
+        soft.artifactForgeTimer,
+        soft.artifactForgeCooldowns,
+      );
+    }
+    if (target.history) {
+      target.history.restoreSoftTimers(soft.historyElapsed, soft.historyTerritoryTimer);
+      target.history.clearEphemeralClusters?.();
+    }
+    target.restoreAiSoft?.(soft.ai);
   }
 
   if (snap.idAllocators) {
