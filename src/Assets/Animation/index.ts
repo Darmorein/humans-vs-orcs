@@ -1,23 +1,13 @@
-/**
- * Art Kit v1.1 animation runtime.
- * Consumes Manifest v2 atlas/clip metadata with deterministic, caller-driven timing.
- */
-
-export { AnimationPlayer, type AnimationSample } from './AnimationPlayer';
-export { clipKey, findClip } from './clipLookup';
-export {
-  absoluteFrameIndex,
-  atlasFrameRect,
-  type AtlasSourceRect,
-} from './frameRect';
-export { facingToIsoDirection } from './isoDirection';
-export {
-  resolveUnitVisualPose,
-  type UnitVisualAnimState,
-  type UnitVisualInput,
-  type UnitVisualPose,
-} from './UnitVisualState';
-export {
-  resetMissingClipDiagnostics,
-  warnMissingClipOnce,
-} from './missingClipDiagnostic';
+export { AnimationPlayer } from './AnimationPlayer.ts';
+export type {
+  AnimationEvent,
+  AnimationReleaseFrameEvent,
+  AnimationUpdateResult,
+} from './AnimationPlayer.ts';
+export { atlasFrameRect, clipFrameRect, findAnimationClip } from './Atlas.ts';
+export type { AtlasFrameRect } from './Atlas.ts';
+export { createMissingClipReporter, reportMissingClip } from './Diagnostics.ts';
+export { worldFacingToIsoDirection } from './Direction.ts';
+export { drawAtlasFrame } from './Draw.ts';
+export { resolveUnitVisualState } from './UnitVisualState.ts';
+export type { UnitVisualState, UnitVisualStateInput } from './UnitVisualState.ts';

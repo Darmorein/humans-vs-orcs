@@ -5,9 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --test tests/animation.test.ts",
     "validate:assets": "node scripts/validate-asset-manifest.mjs",
-    "test:animation": "node scripts/test-animation-runtime.mjs",
-    "test": "npm run test:animation",
     "build": "npm run validate:assets && tsc && vite build",
     "preview": "vite preview",
     "pvp": "node server/pvp-relay.mjs"
