@@ -73,6 +73,12 @@ export interface GameStateSnapshot {
     maxConstructionProgress?: number;
     settlementId?: string | null;
     resourceAmount?: number;
+    remainingAmount?: number;
+    linkedSettlementId?: string | null;
+    controllingFactionId?: string | null;
+    infrastructureLevel?: number;
+    resourceSafety?: number;
+    raidDamageCooldown?: number;
     squadId?: string | null;
     heroId?: string | null;
     artifactId?: string | null;
@@ -124,7 +130,22 @@ export interface GameStateSnapshot {
     focus?: SettlementFocus;
     specialization?: SettlementSpecialization;
     warShock?: number;
+    incomeRates?: { gold: number; food: number; wood: number; stone: number };
   }>;
+  settlerGroups?: Array<{
+    id: string;
+    ownerPlayerId: string;
+    parentSettlementId: string;
+    citizenIds: string[];
+    unitIds: number[];
+    targetX: number | null;
+    targetY: number | null;
+    status: string;
+    caravanX: number;
+    caravanY: number;
+    caravanSpeed: number;
+  }>;
+  transitCitizens?: Array<{ groupId: string; citizens: Citizen[] }>;
   squads?: SquadSnapshot[];
   heroes?: Hero[];
   artifacts?: Artifact[];
@@ -188,7 +209,10 @@ export function serializeGameState(args: {
       focus: s.focus,
       specialization: s.specialization,
       warShock: s.warShock,
+      incomeRates: { ...s.incomeRates },
     })),
+    settlerGroups: args.settlements.exportSettlerGroups(),
+    transitCitizens: args.settlements.exportTransitCitizens(),
     squads: args.squads
       ? args.squads.all().map((sq) => ({
           id: sq.id,
@@ -259,7 +283,13 @@ function serializeEntity(e: Entity): GameStateSnapshot['entities'][number] {
     return {
       ...base,
       kind: 'resource' as const,
-      resourceAmount: e.resourceAmount,
+      resourceAmount: e.remainingAmount,
+      remainingAmount: e.remainingAmount,
+      linkedSettlementId: e.linkedSettlementId,
+      controllingFactionId: e.controllingFactionId,
+      infrastructureLevel: e.infrastructureLevel,
+      resourceSafety: e.safety,
+      raidDamageCooldown: e.raidDamageCooldown,
     };
   }
   return { ...base, kind: 'other' as const };

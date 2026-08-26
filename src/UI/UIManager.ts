@@ -1,6 +1,7 @@
 import { Entity } from '../Entities/Entity';
 import { Unit } from '../Entities/Unit';
 import { Building, isMainBuilding } from '../Entities/Building';
+import { ResourceNode } from '../Entities/ResourceNode';
 import { MatchState } from '../Players/MatchState';
 import { isOwnedBy } from '../Players/Relations';
 import { FACTIONS } from '../Players/Types';
@@ -68,7 +69,7 @@ export class UIManager {
           .list()
           .map((p) => `${p.id}:${p.status}`)
           .join('|') +
-        `|c${settlement.population}|t${settlement.tier}|f${settlement.focus}|sp${settlement.specialization}|w${settlement.warShock.toFixed(2)}|g${groupReady ? 1 : 0}|sq${squads.map((s) => `${s.id}:${s.size}`).join(',')}|h${this.game.getHeroSystem().heroesForPlayer(local?.id ?? '').map((h) => h.id).join(',')}|a${this.game.getArtifactSystem().forPlayer(local?.id ?? '').map((x) => `${x.id}:${x.boundUnitId ?? 'v'}`).join(',')}`
+        `|c${settlement.population}|t${settlement.tier}|f${settlement.focus}|sp${settlement.specialization}|w${settlement.warShock.toFixed(2)}|ig${settlement.incomeRates.gold.toFixed(1)}|g${groupReady ? 1 : 0}|sq${squads.map((s) => `${s.id}:${s.size}`).join(',')}|h${this.game.getHeroSystem().heroesForPlayer(local?.id ?? '').map((h) => h.id).join(',')}|a${this.game.getArtifactSystem().forPlayer(local?.id ?? '').map((x) => `${x.id}:${x.boundUnitId ?? 'v'}`).join(',')}`
       : `sq${squads.map((s) => `${s.id}:${s.size}`).join(',')}`;
 
     if (
@@ -108,6 +109,16 @@ export class UIManager {
       infoHtml += `<h3>${this.getEntityName(entity)}</h3>`;
       infoHtml += `<p>HP: ${Math.ceil(entity.hp)} / ${entity.maxHp}</p>`;
 
+      if (entity instanceof ResourceNode) {
+        infoHtml += `<p>Gold deposit · remaining ${Math.floor(entity.remainingAmount)}</p>`;
+        infoHtml += `<p>Controlled by: ${entity.controllingFactionId ?? 'none'}</p>`;
+        infoHtml += `<p>Linked: ${entity.linkedSettlementId ?? '—'} · infra ${entity.infrastructureLevel.toFixed(1)}</p>`;
+        infoHtml += `<p>Output ~${entity.lastExtractionRate.toFixed(1)}/s · safety ${Math.round(entity.safety * 100)}%</p>`;
+        if (entity.raidDamageCooldown > 0) {
+          infoHtml += `<p class="muted">Raid damage ${entity.raidDamageCooldown.toFixed(1)}s</p>`;
+        }
+      }
+
       if (local && entity instanceof Unit && isOwnedBy(entity, local.id)) {
         infoHtml += this.heroInfoHtml(entity);
         infoHtml += this.artifactInfoHtml(entity);
@@ -118,8 +129,7 @@ export class UIManager {
           }
         }
         if (entity.unitType === 'Worker' || entity.unitType === 'Peon') {
-          infoHtml += `<p>Gold: ${entity.heldGold} / 10</p>`;
-          infoHtml += `<p class="muted">Autonomous builds: House / Farm / Storage / Roads</p>`;
+          infoHtml += `<p class="muted">Legacy civilian (not commandable)</p>`;
         } else if (!entity.heroId) {
           infoHtml += `<p>Damage: ${entity.damage}</p>`;
         }
@@ -130,14 +140,13 @@ export class UIManager {
       infoHtml += `<p>Mats: W${Math.floor(settlement.wood)} S${Math.floor(settlement.stone)} I${Math.floor(settlement.iron)}</p>`;
       if (entity instanceof Building && isMainBuilding(entity.buildingType)) {
         const by = populationSim.countByProfession(settlement);
-        const top = (Object.entries(by) as [keyof typeof by, number][])
-          .filter(([, n]) => n > 0)
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 4)
-          .map(([role, n]) => `${professionLabel(local.factionId, role)} ${n}`)
-          .join(', ');
-        infoHtml += `<p>${TIER_DEFS[settlement.tier].label} · Citizens ${settlement.population}/${settlement.housing}</p>`;
-        infoHtml += `<p>Safety ${Math.round(settlement.safety * 100)}% · Focus ${settlementFocusLabel(settlement.focus)} · ${specializationLabel(settlement.specialization)}</p>`;
+        const mil = by.soldier;
+        const labor = Math.round(settlement.civicLabor * 10) / 10;
+        infoHtml += `<p>${TIER_DEFS[settlement.tier].label} · Pop ${settlement.population}/${settlement.housing} · Labor ${labor} · Mil ${mil}</p>`;
+        infoHtml += `<p>Income G${settlement.incomeRates.gold.toFixed(1)}/s F${settlement.incomeRates.food.toFixed(1)} W${settlement.incomeRates.wood.toFixed(1)} S${settlement.incomeRates.stone.toFixed(1)}</p>`;
+        infoHtml += `<p class="muted">Gold mines ${settlement.incomeSources.goldMines.toFixed(1)} · Farms ${settlement.incomeSources.foodFarms.toFixed(1)}</p>`;
+        infoHtml += `<p>Infra mines ${settlement.mineCount} · farms ${settlement.farmCount} · outposts ${settlement.outpostCount}</p>`;
+        infoHtml += `<p>Safety ${Math.round(settlement.safety * 100)}% · Influence ${Math.round(settlement.influence * 100)}% · Focus ${settlementFocusLabel(settlement.focus)} · ${specializationLabel(settlement.specialization)}</p>`;
         infoHtml += `<p class="muted">Attract ${Math.round(settlement.migrationAttraction * 100)}% · Jobs ${Math.round(settlement.jobs * 100)}%</p>`;
         const growth = settlement.growthHints.slice(0, 3);
         const safetyH = settlement.safetyHints.slice(0, 3);
@@ -147,6 +156,12 @@ export class UIManager {
         if (safetyH.length) {
           infoHtml += `<p class="muted">Safety: ${safetyH.join('; ')}</p>`;
         }
+        const top = (Object.entries(by) as [keyof typeof by, number][])
+          .filter(([, n]) => n > 0)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 4)
+          .map(([role, n]) => `${professionLabel(local.factionId, role)} ${n}`)
+          .join(', ');
         if (top) infoHtml += `<p class="muted">${top}</p>`;
         const heroes = this.game.getHeroSystem().heroesForPlayer(local.id);
         if (heroes.length > 0) {
@@ -171,6 +186,7 @@ export class UIManager {
   }
 
   private getEntityName(entity: Entity): string {
+    if (entity instanceof ResourceNode) return 'Gold Deposit';
     if (entity instanceof Building) {
       if (entity.buildingType === 'PigFarm') return 'War Hut';
       if (entity.buildingType === 'OrcBarracks') return 'Orc Barracks';
@@ -253,16 +269,6 @@ export class UIManager {
     if (entity instanceof Building && isMainBuilding(entity.buildingType)) {
       if (!entity.isConstructed) return;
 
-      const workerDef = getUnitDef(faction.workerType);
-      const workerCost = workerDef?.goldCost ?? 50;
-      const workerPop = workerDef?.populationCost ?? 1;
-      const canDraftWorker = (settlement?.population ?? 0) >= workerPop;
-      this.createButton(
-        `Train ${faction.workerType} (${workerCost}G + ${workerPop} cit)`,
-        gold >= workerCost && canDraftWorker,
-        () => this.game.trainUnit(entity, faction.workerType),
-      );
-
       for (const recipe of strategicOptionsForFaction(local.factionId, settlement?.tier)) {
         const afford =
           settlement?.canAfford(recipe.costs) ||
@@ -275,6 +281,10 @@ export class UIManager {
           () => this.game.startBuildingPlacement(recipe.target as BuildingType),
         );
       }
+
+      this.createButton('Establish Outpost', true, () =>
+        this.game.startEstablishOutpostPlacement(),
+      );
 
       if (settlement) {
         for (const f of SETTLEMENT_FOCUSES) {
@@ -293,10 +303,9 @@ export class UIManager {
       this.createButton(
         ready
           ? 'Found Settlement Here'
-          : `Form Settler Group (${doc.settlerGoldCost}G/${doc.settlerWoodCost}W)`,
+          : `Form Settler Caravan (${doc.settlerGoldCost}G/${doc.settlerWoodCost}W)`,
         ready || canForm,
         () => {
-          // Placement is local UI; founding mutates via FoundSettlementCommand.
           if (!ready && canForm) {
             this.game.formSettlerGroup();
           }
@@ -306,7 +315,7 @@ export class UIManager {
       if (!ready && !canForm && settlement) {
         const hint = document.createElement('div');
         hint.className = 'queue-hint';
-        hint.textContent = `Settlers need Village+, ${doc.settlerMinPop}+ citizens, idle workers (${local.faction.displayName})`;
+        hint.textContent = `Settlers need Village+, ${doc.settlerMinPop}+ citizens (${local.faction.displayName})`;
         this.actionButtonsDiv.appendChild(hint);
       }
 

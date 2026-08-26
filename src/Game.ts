@@ -26,6 +26,7 @@ import {
   resolveLocalMatchOutcome,
 } from './Players/FactionDefeatState';
 import { SettlementSystem } from './Settlement/SettlementSystem';
+import { civilianVisualAgents } from './Settlement/CivilianVisualAgents';
 import { populationSim, PopulationSim } from './Settlement/Population/PopulationSim';
 import { TIER_DEFS } from './Settlement/SettlementTier';
 import type { SettlementFocus } from './Settlement/SettlementFocus';
@@ -62,7 +63,7 @@ import {
   type SaveGame,
 } from './Sim';
 import { compareAiVsAiHashes, diffSnapshotHints } from './Sim/determinismTest';
-import { spawnUnitNearBuilding, spawnUnitRegistered } from './Sim/spawnUnit';
+import { spawnUnitNearBuilding } from './Sim/spawnUnit';
 import { PVP_COMMAND_DELAY_TICKS, type PvpSession } from './Net';
 
 /** Boot options for skirmish or synchronized PvP 1v1. */
@@ -104,6 +105,7 @@ export class Game {
   private uiManager: UIManager;
   private settlementSystem: SettlementSystem;
   private influenceMap: InfluenceMap;
+  private civilianVisuals = civilianVisualAgents;
   private squadSystem: SquadSystem;
   private heroSystem: HeroSystem;
   private artifactSystem: ArtifactSystem;
@@ -119,7 +121,7 @@ export class Game {
   /** Monotonic simulation tick (fixed step). */
   private simTick = 0;
 
-  private placementMode: BuildingType | 'foundSettlement' | null = null;
+  private placementMode: BuildingType | 'foundSettlement' | 'establishOutpost' | null = null;
   private gameState: 'playing' | 'victory' | 'defeat' = 'playing';
 
   private pvpSession: PvpSession | null = null;
@@ -465,6 +467,7 @@ export class Game {
   public applySave(save: SaveGame): void {
     this.gameState = 'playing';
     this.placementMode = null;
+    this.civilianVisuals.clear();
     this.commandQueue.drain();
     this.selectionSystem.selectedEntities = [];
 
@@ -549,6 +552,11 @@ export class Game {
     const group = this.settlementSystem.getSettlerGroup(local.id);
     if (!group && !this.settlementSystem.canFormSettlerGroup(local.id, local.factionId)) return;
     this.placementMode = 'foundSettlement';
+  }
+
+  public startEstablishOutpostPlacement() {
+    if (this.gameState !== 'playing') return;
+    this.placementMode = 'establishOutpost';
   }
 
   public formSettlerGroup(): boolean {
@@ -640,48 +648,20 @@ export class Game {
     return player.id === 'player-1' ? this.gameMap.startA : this.gameMap.startB;
   }
 
-  private seatIndex(player: PlayerState): 0 | 1 {
-    return player.id === 'player-1' ? 0 : 1;
-  }
-
   private spawnPlayers() {
     for (const player of this.match.allPlayers()) {
       const base = this.baseForPlayer(player);
       const faction = player.faction;
-      const seat = this.seatIndex(player);
 
       this.entities.push(new Building(base.x, base.y, faction.mainBuilding, player));
 
-      const workerCount = player.controllerType === 'AI' ? 4 : 3;
-      // Main building radius is 50; canOccupy blocks ~49.4 — keep all workers clear.
-      // Old seat-1 offsets (-50/-22/+6, y+30) put workers 1–2 inside the footprint.
-      const side = seat === 0 ? 1 : -1;
-      for (let i = 0; i < workerCount; i++) {
-        const ox = side * (60 + i * 28);
-        const oy = 40;
-        spawnUnitRegistered({
-          player,
-          unitType: faction.workerType,
-          x: base.x + ox,
-          y: base.y + oy,
-          entities: this.entities,
-          squads: this.squadSystem,
-        });
-      }
-
-      if (player.controllerType === 'AI') {
+      // Living start: seed civic population after reconcile; small scout squad for pacing.
+      const scoutCount = player.controllerType === 'AI' ? 2 : 2;
+      for (let i = 0; i < scoutCount; i++) {
+        const type = i === 0 ? faction.meleeType : faction.rangedType;
         spawnUnitNearBuilding({
           player,
-          unitType: faction.meleeType,
-          buildingX: base.x,
-          buildingY: base.y,
-          entities: this.entities,
-          squads: this.squadSystem,
-          rng: this.simRng,
-        });
-        spawnUnitNearBuilding({
-          player,
-          unitType: faction.rangedType,
+          unitType: type,
           buildingX: base.x,
           buildingY: base.y,
           entities: this.entities,
@@ -693,6 +673,41 @@ export class Game {
 
     for (const gold of this.gameMap.goldDeposits) {
       this.entities.push(new ResourceNode(gold.x, gold.y, 5000));
+    }
+
+    // Bind TCs → settlements and seed starting citizens (no Worker units).
+    this.settlementSystem.update(
+      0,
+      this.entities,
+      this.match,
+      this.gameMap,
+      this.simRng,
+      this.influenceMap,
+    );
+    for (const player of this.match.allPlayers()) {
+      const s = this.settlementSystem.get(player.id);
+      if (!s) continue;
+      const seed = player.controllerType === 'AI' ? 34 : 28;
+      while (s.citizens.length < seed) {
+        const i = s.citizens.length;
+        s.citizens.push({
+          id: `c-start-${player.id}-${i}`,
+          age: 18 + (i * 5) % 25,
+          profession: i % 5 === 0 ? 'builder' : i % 3 === 0 ? 'farmer' : i % 7 === 0 ? 'miner' : 'peasant',
+          settlementId: s.id,
+          health: 0.9,
+          experience: 5,
+          traits: ['hardy'],
+          prestige: 1,
+          heroId: null,
+        });
+      }
+      s.population = s.citizens.length;
+      s.food = Math.max(s.food, 55);
+      s.wood = Math.max(s.wood, 120);
+      s.stone = Math.max(s.stone, 70);
+      player.gold = Math.max(player.gold, 200);
+      s.gold = player.gold;
     }
   }
 
@@ -876,6 +891,16 @@ export class Game {
           });
           this.placementMode = null;
         }
+      } else if (this.placementMode === 'establishOutpost') {
+        if (this.canPlaceAt(worldPos.x, worldPos.y, footprintForBuildingType('Outpost', local.factionId))) {
+          this.submitCommand({
+            type: 'establishOutpost',
+            playerId: local.id,
+            x: worldPos.x,
+            y: worldPos.y,
+          });
+          this.placementMode = null;
+        }
       } else if (
         this.canPlaceAt(
           worldPos.x,
@@ -964,7 +989,13 @@ export class Game {
       this.simRng,
       this.influenceMap,
     );
-    this.influenceMap.update(dt, this.settlementSystem.all(), this.match);
+    this.influenceMap.update(dt, this.settlementSystem.all(), this.match, this.entities);
+    this.civilianVisuals.update(
+      dt,
+      this.settlementSystem.all(),
+      this.entities,
+      { x: this.camera.x, y: this.camera.y },
+    );
     this.squadSystem.update(dt, {
       entities: this.entities,
       gameMap: this.gameMap,
@@ -1111,6 +1142,22 @@ export class Game {
     drawList.sort((a, b) => a.depth - b.depth);
     for (const item of drawList) item.draw();
 
+    this.civilianVisuals.draw(ctx, this.camera);
+
+    // Settler caravan markers (authoritative position, presentation only)
+    for (const g of this.settlementSystem.exportSettlerGroups()) {
+      if (g.status !== 'traveling' && g.status !== 'ready') continue;
+      const screen = this.camera.worldToScreen(g.caravanX, g.caravanY);
+      ctx.fillStyle = g.status === 'traveling' ? '#FFE082' : '#B0BEC5';
+      ctx.beginPath();
+      ctx.arc(screen.x, screen.y - 8, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#FFF8E1';
+      ctx.font = '10px Segoe UI, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(g.status === 'traveling' ? 'Caravan' : 'Settlers', screen.x, screen.y - 18);
+    }
+
     this.fog.draw(ctx, this.camera);
     this.influenceMap.draw(ctx, this.camera);
 
@@ -1120,7 +1167,9 @@ export class Game {
       const foot =
         this.placementMode === 'foundSettlement'
           ? 44
-          : footprintForBuildingType(this.placementMode, this.match.localPlayer.factionId);
+          : this.placementMode === 'establishOutpost'
+            ? footprintForBuildingType('Outpost', this.match.localPlayer.factionId)
+            : footprintForBuildingType(this.placementMode, this.match.localPlayer.factionId);
       const valid = this.canPlaceAt(worldPos.x, worldPos.y, foot);
       if (this.placementMode === 'foundSettlement') {
         ctx.globalAlpha = 0.5;
@@ -1134,6 +1183,18 @@ export class Game {
         ctx.font = '12px Segoe UI, sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText('Found Settlement Here', screenPos.x, screenPos.y - 36);
+      } else if (this.placementMode === 'establishOutpost') {
+        ctx.globalAlpha = 0.5;
+        drawIsoBox(ctx, screenPos.x, screenPos.y, foot, 26, {
+          top: valid ? '#90CAF9' : '#E57373',
+          left: valid ? '#1565C0' : '#C62828',
+          right: valid ? '#42A5F5' : '#EF5350',
+        });
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = valid ? '#BBDEFB' : '#FFCDD2';
+        ctx.font = '12px Segoe UI, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Establish Outpost (army nearby)', screenPos.x, screenPos.y - 36);
       } else {
         const radius = foot;
         const height =

@@ -63,12 +63,19 @@ export function hydrateFromSnapshot(snap: GameStateSnapshot, target: HydrateTarg
 
   for (const e of snap.entities) {
     if (e.kind === 'resource') {
-      const amount = e.resourceAmount ?? 5000;
+      const amount = e.remainingAmount ?? e.resourceAmount ?? 5000;
       const node = new ResourceNode(e.x, e.y, amount);
       node.assignId(e.id);
       node.hp = e.hp;
       node.maxHp = e.maxHp;
+      node.remainingAmount = amount;
       node.resourceAmount = amount;
+      node.linkedSettlementId = e.linkedSettlementId ?? null;
+      node.controllingFactionId =
+        (e.controllingFactionId as import('../Players/Types').FactionId | null) ?? null;
+      node.infrastructureLevel = e.infrastructureLevel ?? 0;
+      node.safety = e.resourceSafety ?? 1;
+      node.raidDamageCooldown = e.raidDamageCooldown ?? 0;
       target.entities.push(node);
       continue;
     }
@@ -102,6 +109,10 @@ export function hydrateFromSnapshot(snap: GameStateSnapshot, target: HydrateTarg
     if (e.kind === 'unit' && e.unitType && e.ownerPlayerId) {
       const player = target.match.getPlayer(e.ownerPlayerId);
       if (!player) continue;
+      // Legacy workers handled after settlements hydrate (see below).
+      if (e.unitType === 'Worker' || e.unitType === 'Peon') {
+        continue;
+      }
       const opts = target.unitOptions(e.unitType);
       const u = new Unit(e.x, e.y, player, opts);
       u.assignId(e.id);
@@ -129,6 +140,7 @@ export function hydrateFromSnapshot(snap: GameStateSnapshot, target: HydrateTarg
   for (const ent of target.entities) byId.set(ent.id, ent);
   for (const e of snap.entities) {
     if (e.kind !== 'unit') continue;
+    if (e.unitType === 'Worker' || e.unitType === 'Peon') continue;
     const u = byId.get(e.id);
     if (!(u instanceof Unit)) continue;
     u.restoreRuntime(
@@ -144,6 +156,37 @@ export function hydrateFromSnapshot(snap: GameStateSnapshot, target: HydrateTarg
   }
 
   target.settlements.hydrateFromSnapshot(snap.settlements, target.match);
+  if (snap.settlerGroups) {
+    target.settlements.hydrateSettlerMissions(snap.settlerGroups as any, snap.transitCitizens);
+  }
+
+  // Convert legacy Worker/Peon units into civic population (despawn from map).
+  for (const e of snap.entities) {
+    if (e.kind !== 'unit') continue;
+    if (e.unitType !== 'Worker' && e.unitType !== 'Peon') continue;
+    if (!e.ownerPlayerId) continue;
+    const seat =
+      target.settlements.get(e.ownerPlayerId) ??
+      target.settlements.allForOwner(e.ownerPlayerId)[0];
+    if (!seat) continue;
+    seat.citizens.push({
+      id: `c-migrated-${e.id}`,
+      age: 22,
+      profession: 'peasant',
+      settlementId: seat.id,
+      health: 0.85,
+      experience: 4,
+      traits: ['industrious'],
+      prestige: 0,
+      heroId: null,
+    });
+    seat.population = seat.citizens.length;
+    if (e.heldGold) {
+      seat.gold += e.heldGold;
+      const p = target.match.getPlayer(e.ownerPlayerId);
+      if (p) p.gold = seat.gold;
+    }
+  }
 
   if (hasSquadSnap && snap.squads) {
     target.squads.hydrateFromSnapshot(snap.squads);

@@ -23,7 +23,8 @@ export type GameCommand =
   | EquipArtifactCommand
   | UnequipArtifactCommand
   | TransferArtifactCommand
-  | SetSettlementFocusCommand;
+  | SetSettlementFocusCommand
+  | EstablishOutpostCommand;
 
 interface CommandBase {
   /** Issuing seat — unambiguous Player ID. */
@@ -135,6 +136,12 @@ export interface SetSettlementFocusCommand extends CommandBase {
   type: 'setSettlementFocus';
   settlementId: string;
   focus: SettlementFocus;
+}
+
+export interface EstablishOutpostCommand extends CommandBase {
+  type: 'establishOutpost';
+  x: number;
+  y: number;
 }
 
 export function isGameCommand(v: unknown): v is GameCommand {

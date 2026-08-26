@@ -1,7 +1,6 @@
 import { Entity } from '../Entities/Entity';
 import { Unit } from '../Entities/Unit';
 import { Building } from '../Entities/Building';
-import { ResourceNode } from '../Entities/ResourceNode';
 import type { MatchState } from '../Players/MatchState';
 import type { SettlementSystem } from '../Settlement/SettlementSystem';
 import type { SquadSystem } from '../Combat/SquadSystem';
@@ -73,6 +72,8 @@ export function applyCommand(cmd: GameCommand, world: CommandWorld): boolean {
       return applyTransferArtifact(cmd, world);
     case 'setSettlementFocus':
       return world.settlements.setFocus(cmd.playerId, cmd.settlementId, cmd.focus);
+    case 'establishOutpost':
+      return applyEstablishOutpost(cmd, world);
     default:
       return false;
   }
@@ -195,6 +196,8 @@ function applyTrainUnit(
 
   const def = getUnitDef(cmd.unitType);
   if (!def) return false;
+  // Worker / Peon no longer trainable — territorial economy replaces gather micro.
+  if (def.role === 'worker') return false;
 
   const faction = player.faction;
   const isMilitary =
@@ -261,42 +264,34 @@ function applyGather(
   cmd: Extract<GameCommand, { type: 'gather' }>,
   world: CommandWorld,
 ): boolean {
-  const node = world.entities.find(
-    (e): e is ResourceNode =>
-      e instanceof ResourceNode && e.id === cmd.resourceEntityId && !e.isDead,
-  );
-  if (!node) return false;
-  let any = false;
-  for (const id of cmd.unitIds) {
-    const u = world.entities.find(
-      (e): e is Unit => e instanceof Unit && e.id === id && !e.isDead,
-    );
-    if (!u || u.ownerPlayerId !== cmd.playerId) continue;
-    u.gatherCommand(node);
-    any = true;
-  }
-  return any;
+  // Worker gather micro retired — reject for player economy (legacy command kept for hydrate).
+  void cmd;
+  void world;
+  return false;
 }
 
 function applyAssistBuild(
   cmd: Extract<GameCommand, { type: 'assistBuild' }>,
   world: CommandWorld,
 ): boolean {
-  const building = world.entities.find(
-    (e): e is Building =>
-      e instanceof Building && e.id === cmd.buildingId && !e.isDead,
+  // Construction uses civic labor; assistBuild no longer mutates simulation.
+  void cmd;
+  void world;
+  return false;
+}
+
+function applyEstablishOutpost(
+  cmd: Extract<GameCommand, { type: 'establishOutpost' }>,
+  world: CommandWorld,
+): boolean {
+  return world.settlements.establishOutpost(
+    cmd.playerId,
+    cmd.x,
+    cmd.y,
+    world.entities,
+    world.match,
+    world.gameMap,
   );
-  if (!building) return false;
-  let any = false;
-  for (const id of cmd.unitIds) {
-    const u = world.entities.find(
-      (e): e is Unit => e instanceof Unit && e.id === id && !e.isDead,
-    );
-    if (!u || u.ownerPlayerId !== cmd.playerId) continue;
-    u.buildCommand(building);
-    any = true;
-  }
-  return any;
 }
 
 function applyEquipArtifact(
