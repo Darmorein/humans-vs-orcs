@@ -18,6 +18,8 @@ export interface GameContext {
   influence?: InfluenceMap;
   submitCommand: (cmd: GameCommand) => void;
   rng: GameRng;
+  /** Fixed sim tick (tax policy cooldown / AI hysteresis). */
+  simTick?: number;
 }
 
 export interface PlayerController {

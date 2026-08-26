@@ -48,6 +48,18 @@ export function hydrateFromSnapshot(snap: GameStateSnapshot, target: HydrateTarg
     player.pop = p.pop;
     player.maxPop = p.maxPop;
     player.isDefeated = p.isDefeated;
+    if (p.taxPolicy === 'low' || p.taxPolicy === 'normal' || p.taxPolicy === 'high' || p.taxPolicy === 'war') {
+      player.taxPolicy = p.taxPolicy;
+    }
+    if (typeof p.lastTaxChangeTick === 'number') {
+      player.lastTaxChangeTick = p.lastTaxChangeTick;
+    }
+    if (typeof p.treasuryIncomeRate === 'number') {
+      player.treasuryIncomeRate = p.treasuryIncomeRate;
+    }
+    if (Array.isArray(p.taxContributions)) {
+      player.taxContributions = p.taxContributions.map((c) => ({ ...c }));
+    }
   }
 
   target.rng.setState(snap.rngState);
@@ -182,9 +194,8 @@ export function hydrateFromSnapshot(snap: GameStateSnapshot, target: HydrateTarg
     });
     seat.population = seat.citizens.length;
     if (e.heldGold) {
+      // Legacy carried gold → settlement local stock (not Faction Treasury sync).
       seat.gold += e.heldGold;
-      const p = target.match.getPlayer(e.ownerPlayerId);
-      if (p) p.gold = seat.gold;
     }
   }
 

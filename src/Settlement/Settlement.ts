@@ -108,8 +108,12 @@ export class Settlement {
   public civicLabor = 0;
   /** Per-tick resource income breakdown for UI (gold/food/wood/stone). */
   public incomeSources: SettlementIncomeSources = emptyIncomeSources();
-  /** Last-tick rates (per second) for dashboard. */
+  /** Last-tick rates (per second) for dashboard — local production (not tax). */
   public incomeRates = { gold: 0, food: 0, wood: 0, stone: 0 };
+  /** Local gold income rate (mines), for settlement panel. */
+  public localIncomeRate = 0;
+  /** Gold remitted to Faction Treasury last tax tick (/s). */
+  public taxContributionRate = 0;
 
   public buildCooldown = 0;
   public placementSalt = 0;

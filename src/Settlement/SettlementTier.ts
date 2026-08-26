@@ -125,6 +125,14 @@ export function isBuildingAllowed(tier: SettlementTier, target: ConstructionTarg
   return TIER_DEFS[tier].allowedBuildings.includes(target);
 }
 
+/** Lowest tier that unlocks this building, or null if never. */
+export function minTierForBuilding(target: ConstructionTarget): SettlementTier | null {
+  for (const tier of TIER_ORDER) {
+    if (TIER_DEFS[tier].allowedBuildings.includes(target)) return tier;
+  }
+  return null;
+}
+
 /** Promote if population + structures meet the next tier's thresholds. */
 export function evaluateTier(current: SettlementTier, population: number, structures: number): SettlementTier {
   let tier = current;

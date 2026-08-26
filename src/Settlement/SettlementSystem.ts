@@ -11,7 +11,7 @@ import { ResourceNode } from '../Entities/ResourceNode';
 import { Unit } from '../Entities/Unit';
 import type { GameMap } from '../Map/GameMap';
 import type { InfluenceMap } from '../Map/InfluenceMap';
-import { canPlaceBuildingAt, footprintForBuildingType } from '../Map/BuildPlacement';
+import { canPlaceBuildingAt, footprintForBuildingType, placementBlockReason } from '../Map/BuildPlacement';
 import { createTile } from '../Map/Terrain';
 import type { MatchState, PlayerState } from '../Players/MatchState';
 import { FACTIONS } from '../Players/Types';
@@ -19,6 +19,7 @@ import { isHostile } from '../Players/Relations';
 import {
   autonomousFarmForFaction,
   getRecipe,
+  treasuryGoldCost,
   type ConstructionTarget,
 } from './ConstructionCatalog';
 import type { ConstructionProject } from './ConstructionQueue';
@@ -51,6 +52,8 @@ import {
   type SettlementLayoutId,
 } from './LayoutVariants';
 import type { FactionId } from '../Players/Types';
+import type { TaxContribution } from '../Players/MatchState';
+import { TAX_POLICY_DEFS, type TaxPolicyDef } from '../Players/TaxPolicy';
 import type { GameRng } from '../Sim/GameRng';
 import type { Citizen } from './Population/Types';
 
@@ -59,12 +62,22 @@ const STONE_PASSIVE = 0.1;
 /** Base gold extraction per second at infra 0 / full safety / owned. */
 const GOLD_BASE_EXTRACTION = 2.2;
 const FOOD_PER_FARM = 1.15;
+/** Matches PopulationSim food use — used for tax food-reserve target. */
+const FOOD_PER_CITIZEN = 0.45;
 const LINK_MINE_RANGE = 520;
 const RAID_RANGE = 90;
 const OUTPOST_COST = { gold: 60, wood: 25, stone: 40, iron: 5 };
+/**
+ * Treasury gold to establish an outpost.
+ * Test A: establishOutpost spends only player.gold via match.trySpend(OUTPOST_TREASURY_COST);
+ * settlement.gold must be unchanged after a successful establish.
+ */
+export const OUTPOST_TREASURY_COST = treasuryGoldCost(OUTPOST_COST);
 const OUTPOST_MIN_DIST_FROM_TC = 160;
 const OUTPOST_MAX_DIST_FROM_ARMY = 110;
 const OUTPOST_MIN_DIST_BETWEEN = 140;
+const MIN_LOCAL_GOLD_RESERVE = 40;
+const TAX_TICK_INTERVAL = 1;
 
 let nextSettlementSeq = 1;
 
@@ -89,6 +102,8 @@ export class SettlementSystem {
   private settlerGroups: SettlerGroup[] = [];
   /** Active only during `update` — road rolls / settler scatter. */
   private tickRng: GameRng | null = null;
+  /** Accumulator for ~1s tax remittance ticks. */
+  private taxAccum = 0;
 
   public ensure(playerId: string, factionId: FactionId = 'humans'): Settlement {
     const existing = this.primaryFor(playerId);
@@ -223,7 +238,7 @@ export class SettlementSystem {
       this.syncFromWorld(s, entities, player, influence);
       this.simulateEconomy(s, dt, entities, player, influence);
       this.recomputeNeeds(s, player.factionId);
-      this.deriveCivicStats(s, player.factionId, entities);
+      this.deriveCivicStats(s, player.factionId, entities, TAX_POLICY_DEFS[player.taxPolicy]);
       this.refreshTier(s);
       this.refreshFeedbackHints(s, player.factionId);
       s.warShock = Math.max(0, s.warShock - dt * 0.035);
@@ -232,15 +247,20 @@ export class SettlementSystem {
       this.processQueue(s, entities, match, gameMap, player, dt);
     }
 
+    this.taxAccum += dt;
+    if (this.taxAccum >= TAX_TICK_INTERVAL) {
+      const interval = this.taxAccum;
+      this.taxAccum = 0;
+      this.applyTaxTick(match, interval);
+    }
+
     for (const player of match.allPlayers()) {
       if (player.isDefeated) continue;
       const owned = this.allForOwner(player.id);
       if (owned.length === 0) continue;
       player.maxPop = Math.max(1, owned.reduce((a, s) => a + s.housing, 0));
       player.pop = owned.reduce((a, s) => a + s.unitCount, 0);
-      const primary = this.primaryFor(player.id)!;
-      player.gold = primary.gold;
-      for (const s of owned) s.gold = player.gold;
+      // Faction Treasury (player.gold) and settlement.gold stay independent.
     }
 
     const active = this.all().filter((s) => {
@@ -274,32 +294,54 @@ export class SettlementSystem {
     return this.get(playerId)?.queue.move(projectId, direction) ?? false;
   }
 
-  public canFormSettlerGroup(playerId: string, factionId: FactionId = 'humans'): boolean {
+  public canFormSettlerGroup(
+    playerId: string,
+    factionId: FactionId = 'humans',
+    match?: MatchState,
+  ): boolean {
     const s = this.primaryFor(playerId);
     const d = doctrineOf(factionId);
     if (!s || !s.hasTownCenter) return false;
     if (!TIER_DEFS[s.tier].canSendSettlers) return false;
     if (s.population < d.settlerMinPop) return false;
     if (s.citizens.length < d.settlerCitizens + 3) return false;
-    if (s.gold < d.settlerGoldCost || s.wood < d.settlerWoodCost) return false;
     if (this.getSettlerGroup(playerId)) return false;
+    const player = match?.getPlayer(playerId);
+    const treasuryNeed = this.settlerTreasuryCost(s, d.settlerGoldCost, d.settlerWoodCost);
+    if (player) {
+      if (player.gold < treasuryNeed) return false;
+    } else if (s.gold < d.settlerGoldCost || s.wood < d.settlerWoodCost) {
+      return false;
+    }
     return true;
   }
 
   /**
    * Reserve citizens + materials for a Settler Group (caravan — no map workers).
+   * Gold from Faction Treasury; wood from settlement surplus or extra treasury.
    */
   public formSettlerGroup(
     playerId: string,
     entities: Entity[],
     factionId: FactionId,
+    match?: MatchState,
   ): SettlerGroup | null {
-    if (!this.canFormSettlerGroup(playerId, factionId)) return null;
+    if (!this.canFormSettlerGroup(playerId, factionId, match)) return null;
     const s = this.primaryFor(playerId)!;
     const d = doctrineOf(factionId);
     void entities;
 
-    if (
+    const woodReserve = this.constructionWoodReserve();
+    const woodFromSettlement =
+      s.wood - d.settlerWoodCost >= woodReserve ? d.settlerWoodCost : 0;
+    const woodTreasuryAdd =
+      woodFromSettlement > 0 ? 0 : d.settlerWoodCost * 0.5;
+    const treasuryNeed = d.settlerGoldCost + woodTreasuryAdd;
+
+    if (match) {
+      if (!match.trySpend(playerId, treasuryNeed)) return null;
+      if (woodFromSettlement > 0) s.wood -= woodFromSettlement;
+    } else if (
       !s.spendMaterials({
         gold: d.settlerGoldCost,
         wood: d.settlerWoodCost,
@@ -345,10 +387,11 @@ export class SettlementSystem {
     y: number,
     entities: Entity[],
     factionId: 'humans' | 'orcs',
+    match?: MatchState,
   ): boolean {
     let group = this.getSettlerGroup(playerId);
     if (!group || group.status !== 'ready') {
-      group = this.formSettlerGroup(playerId, entities, factionId) ?? undefined;
+      group = this.formSettlerGroup(playerId, entities, factionId, match) ?? undefined;
     }
     if (!group || group.status !== 'ready') return false;
 
@@ -364,6 +407,79 @@ export class SettlementSystem {
   }
 
   /**
+   * Why establishOutpost would fail at (x,y), or null if allowed.
+   * Shared by UI feedback and the authoritative establish path.
+   */
+  public establishOutpostBlockReason(
+    playerId: string,
+    x: number,
+    y: number,
+    entities: Entity[],
+    match: MatchState,
+    gameMap: GameMap,
+    influence?: InfluenceMap,
+  ): string | null {
+    const player = match.getPlayer(playerId);
+    const s = this.primaryFor(playerId);
+    if (!player || !s || !s.hasTownCenter) return 'No town center';
+    if (!isBuildingAllowed(s.tier, 'Outpost')) {
+      return `Needs ${TIER_DEFS.village.label}+ (now ${TIER_DEFS[s.tier].label})`;
+    }
+    const need = OUTPOST_TREASURY_COST;
+    if (player.gold < need) {
+      return `Need ${Math.ceil(need - player.gold)} Treasury gold`;
+    }
+
+    const distTc = Math.hypot(x - s.centerX, y - s.centerY);
+    if (distTc < OUTPOST_MIN_DIST_FROM_TC) {
+      return `Too close to town (min ${OUTPOST_MIN_DIST_FROM_TC})`;
+    }
+    const maxDist = s.expansionRadius * 2.8 + 280;
+    if (distTc > maxDist) return 'Too far from settlement';
+
+    const faction = FACTIONS[player.factionId];
+    let armyNear = 0;
+    for (const e of entities) {
+      if (!(e instanceof Unit) || e.isDead || e.ownerPlayerId !== playerId) continue;
+      if (e.unitType !== faction.meleeType && e.unitType !== faction.rangedType) continue;
+      if (Math.hypot(e.x - x, e.y - y) <= OUTPOST_MAX_DIST_FROM_ARMY) armyNear += 1;
+    }
+    if (armyNear < 1) {
+      return `Need army within ${OUTPOST_MAX_DIST_FROM_ARMY} (melee/ranged)`;
+    }
+
+    for (const e of entities) {
+      if (!(e instanceof Building) || e.isDead) continue;
+      if (!isOutpostBuilding(e.buildingType)) continue;
+      if (e.ownerPlayerId !== playerId) continue;
+      if (Math.hypot(e.x - x, e.y - y) < OUTPOST_MIN_DIST_BETWEEN) {
+        return 'Too close to another outpost/fort';
+      }
+    }
+
+    if (influence) {
+      const ctrl = influence.getControlAt(x, y);
+      if (ctrl !== 'none' && ctrl !== 'contested' && ctrl !== player.factionId) {
+        const enemyInf = influence.getFactionInfluenceAt(x, y, ctrl);
+        const ownInf = influence.getFactionInfluenceAt(x, y, player.factionId);
+        if (enemyInf > ownInf * 1.6 && enemyInf > 40) {
+          return 'Enemy territory too strong';
+        }
+      }
+    }
+
+    const place = placementBlockReason(
+      x,
+      y,
+      gameMap,
+      entities,
+      footprintForBuildingType('Outpost', player.factionId),
+    );
+    if (place) return place;
+    return null;
+  }
+
+  /**
    * Establish an Outpost near friendly army presence — GameCommands path.
    * Requires combat units nearby, min distance from TC, not deep in enemy solid control.
    */
@@ -376,47 +492,14 @@ export class SettlementSystem {
     gameMap: GameMap,
     influence?: InfluenceMap,
   ): boolean {
-    const player = match.getPlayer(playerId);
-    const s = this.primaryFor(playerId);
-    if (!player || !s || !s.hasTownCenter) return false;
-    if (!isBuildingAllowed(s.tier, 'Outpost')) return false;
-    if (!s.canAfford(OUTPOST_COST)) return false;
-
-    const distTc = Math.hypot(x - s.centerX, y - s.centerY);
-    if (distTc < OUTPOST_MIN_DIST_FROM_TC) return false;
-    if (distTc > s.expansionRadius * 2.8 + 280) return false;
-
-    const faction = FACTIONS[player.factionId];
-    let armyNear = 0;
-    for (const e of entities) {
-      if (!(e instanceof Unit) || e.isDead || e.ownerPlayerId !== playerId) continue;
-      if (e.unitType !== faction.meleeType && e.unitType !== faction.rangedType) continue;
-      if (Math.hypot(e.x - x, e.y - y) <= OUTPOST_MAX_DIST_FROM_ARMY) armyNear += 1;
-    }
-    if (armyNear < 1) return false;
-
-    for (const e of entities) {
-      if (!(e instanceof Building) || e.isDead) continue;
-      if (!isOutpostBuilding(e.buildingType)) continue;
-      if (e.ownerPlayerId !== playerId) continue;
-      if (Math.hypot(e.x - x, e.y - y) < OUTPOST_MIN_DIST_BETWEEN) return false;
-    }
-
-    if (influence) {
-      const ctrl = influence.getControlAt(x, y);
-      if (ctrl !== 'none' && ctrl !== 'contested' && ctrl !== player.factionId) {
-        // Deep enemy solid control — reject
-        const enemyInf = influence.getFactionInfluenceAt(x, y, ctrl);
-        const ownInf = influence.getFactionInfluenceAt(x, y, player.factionId);
-        if (enemyInf > ownInf * 1.6 && enemyInf > 40) return false;
-      }
-    }
-
-    if (!canPlaceBuildingAt(x, y, gameMap, entities, footprintForBuildingType('Outpost', player.factionId))) {
+    if (
+      this.establishOutpostBlockReason(playerId, x, y, entities, match, gameMap, influence)
+    ) {
       return false;
     }
-    if (!s.spendMaterials(OUTPOST_COST)) return false;
-    player.gold = s.gold;
+    const player = match.getPlayer(playerId)!;
+    const s = this.primaryFor(playerId)!;
+    if (!match.trySpend(playerId, OUTPOST_TREASURY_COST)) return false;
 
     const building = new Building(x, y, 'Outpost', player, false);
     building.settlementId = s.id;
@@ -615,7 +698,7 @@ export class SettlementSystem {
     player: PlayerState,
     influence?: InfluenceMap,
   ) {
-    s.gold = player.gold;
+    // Local settlement gold stays independent of Faction Treasury (player.gold).
     s.unitCount = 0;
     s.housing = 0;
     s.houseCount = 0;
@@ -807,6 +890,80 @@ export class SettlementSystem {
       wood: WOOD_PASSIVE,
       stone: STONE_PASSIVE,
     };
+    s.localIncomeRate = s.incomeRates.gold;
+  }
+
+  /**
+   * Remit taxable surplus from settlements → Faction Treasury (~1s).
+   * Local production stays in settlement.gold until taxed.
+   */
+  private applyTaxTick(match: MatchState, interval: number) {
+    const house = getRecipe('House');
+    const goldReserveBase = Math.max(MIN_LOCAL_GOLD_RESERVE, house?.costs.gold ?? 20);
+
+    for (const player of match.allPlayers()) {
+      if (player.isDefeated) continue;
+      const tax = TAX_POLICY_DEFS[player.taxPolicy];
+      const owned = this.allForOwner(player.id);
+      const contributions: TaxContribution[] = [];
+      let transferSum = 0;
+
+      for (const s of owned) {
+        if (!s.hasTownCenter) {
+          s.taxContributionRate = 0;
+          continue;
+        }
+
+        const foodTarget = s.citizens.length * FOOD_PER_CITIZEN * 45;
+        const foodCritical = s.food < foodTarget * 0.25 || s.food < 8;
+        const healthFactor =
+          foodCritical || s.prosperity < 0.2 ? 0 : clamp(0.55 + s.prosperity * 0.45, 0, 1);
+
+        const goldReserve = goldReserveBase;
+        const taxableSurplus = Math.max(0, s.gold - goldReserve) * healthFactor;
+        const transfer = taxableSurplus * tax.rate;
+        if (transfer > 0.01) {
+          s.gold -= transfer;
+          player.gold += transfer;
+          transferSum += transfer;
+          contributions.push({
+            settlementId: s.id,
+            label: TIER_DEFS[s.tier].label,
+            amount: transfer / interval,
+          });
+          s.taxContributionRate = transfer / interval;
+        } else {
+          s.taxContributionRate = 0;
+        }
+
+        // Soft policy pressure once per tax tick.
+        s.warShock = clamp(s.warShock + tax.warShockAdd, 0, 1);
+        if (tax.developmentPenalty > 1) {
+          s.buildCooldown = Math.max(
+            s.buildCooldown,
+            0.08 * (tax.developmentPenalty - 1),
+          );
+        }
+      }
+
+      player.taxContributions = contributions;
+      const rate = interval > 0 ? transferSum / interval : 0;
+      player.treasuryIncomeRate = player.treasuryIncomeRate * 0.65 + rate * 0.35;
+    }
+  }
+
+  private constructionWoodReserve(): number {
+    return getRecipe('House')?.costs.wood ?? 30;
+  }
+
+  private settlerTreasuryCost(
+    s: Settlement,
+    goldCost: number,
+    woodCost: number,
+  ): number {
+    const woodReserve = this.constructionWoodReserve();
+    const canTakeWood = s.wood - woodCost >= woodReserve;
+    return goldCost + (canTakeWood ? 0 : woodCost * 0.5);
   }
 
   /** Link nearby gold deposits to owned settlements / outposts. */
@@ -940,7 +1097,12 @@ export class SettlementSystem {
     s.needs.defense = clamp(s.needs.defense * bias.defense, 0, 1);
   }
 
-  private deriveCivicStats(s: Settlement, factionId: FactionId, entities: Entity[]) {
+  private deriveCivicStats(
+    s: Settlement,
+    factionId: FactionId,
+    entities: Entity[],
+    tax?: TaxPolicyDef,
+  ) {
     const d = doctrineOf(factionId);
     const by = populationSim.countByProfession(s);
     const n = Math.max(1, s.citizens.length);
@@ -957,7 +1119,7 @@ export class SettlementSystem {
       Math.max(0, wantCraft - by.craftsman);
     s.jobs = clamp(open / n, 0, 1);
 
-    s.prosperity = clamp(
+    const baseProsperity = clamp(
       0.25 +
         s.food / 120 +
         s.gold / 800 +
@@ -968,6 +1130,9 @@ export class SettlementSystem {
       0,
       1,
     );
+    // Soft tax bias (slowly via mild exponent so Normal≈identity).
+    const pBias = tax?.prosperityBias ?? 1;
+    s.prosperity = clamp(baseProsperity * Math.pow(pBias, 0.35), 0, 1);
     s.culture = clamp(0.2 + s.houseCount * 0.08 + s.prosperity * 0.3, 0, 1);
     s.knowledge = clamp(
       0.2 + s.prosperity * 0.2 + by.craftsman * 0.03 + (s.focus === 'crafting' ? 0.08 : 0),
@@ -1000,7 +1165,7 @@ export class SettlementSystem {
       (s.tier === 'city' ? 0.08 : 0) *
       (s.prosperity > 0.45 ? 1 : 0.5);
 
-    s.migrationAttraction = clamp(
+    const baseMigration = clamp(
       foodScore * 0.22 +
         housingScore * 0.22 +
         s.safety * 0.2 +
@@ -1012,6 +1177,8 @@ export class SettlementSystem {
       0,
       1,
     );
+    const mBias = tax?.migrationBias ?? 1;
+    s.migrationAttraction = clamp(baseMigration * Math.pow(mBias, 0.4), 0, 1);
 
     s.influence = clamp(
       s.prosperity * 0.3 +
@@ -1095,7 +1262,10 @@ export class SettlementSystem {
         !s.queue.hasQueuedOrBuilding('Wall')
       ) {
         const wall = getRecipe('Wall');
-        if (wall && s.canAfford(wall.costs)) s.queue.enqueue('Wall', 'autonomous');
+        if (wall) {
+          const need = treasuryGoldCost(wall.costs);
+          if (player.gold >= need) s.queue.enqueue('Wall', 'autonomous');
+        }
       }
       return;
     }
@@ -1113,9 +1283,15 @@ export class SettlementSystem {
     if (!target || !isBuildingAllowed(s.tier, target)) return;
     if (s.queue.hasQueuedOrBuilding(target)) return;
     const recipe = getRecipe(target);
-    if (!recipe || !s.canAfford(recipe.costs)) return;
+    if (!recipe) return;
+    if (recipe.fundingSource === 'treasury' || recipe.fundingSource === 'mixed') {
+      if (player.gold < treasuryGoldCost(recipe.costs)) return;
+    } else if (!s.canAfford(recipe.costs)) {
+      return;
+    }
     s.queue.enqueue(target, 'autonomous');
-    s.buildCooldown = 1.5;
+    const tax = TAX_POLICY_DEFS[player.taxPolicy];
+    s.buildCooldown = 1.5 * tax.developmentPenalty;
   }
 
   private processQueue(
@@ -1126,17 +1302,12 @@ export class SettlementSystem {
     player: PlayerState,
     dt: number,
   ) {
-    const unfinished = entities.find(
-      (e): e is Building =>
-        e instanceof Building &&
-        e.ownerPlayerId === s.playerId &&
-        (e.settlementId === s.id || !e.settlementId) &&
-        this.belongsToSettlement(e, s, this.allForOwner(s.playerId)) &&
-        !e.isDead &&
-        !e.isConstructed,
-    );
-    if (unfinished) {
-      this.advanceCivicConstruction(s, unfinished, dt);
+    // Advance every unfinished seat building (Outpost + queued sites) — not just the first.
+    for (const e of entities) {
+      if (!(e instanceof Building) || e.isDead || e.isConstructed) continue;
+      if (e.ownerPlayerId !== s.playerId) continue;
+      if (!this.belongsToSettlement(e, s, this.allForOwner(s.playerId))) continue;
+      this.advanceCivicConstruction(s, e, entities, dt);
     }
 
     const active = s.queue.active();
@@ -1152,9 +1323,31 @@ export class SettlementSystem {
   }
 
   /** Construction progress from civic labor pool — not map Worker micro. */
-  private advanceCivicConstruction(s: Settlement, building: Building, dt: number) {
+  private advanceCivicConstruction(
+    s: Settlement,
+    building: Building,
+    entities: Entity[],
+    dt: number,
+  ) {
     if (building.isConstructed) return;
-    const labor = Math.max(0.35, s.civicLabor);
+    let labor = Math.max(0.35, s.civicLabor);
+    // Field outposts build faster while friendly combat units hold the site.
+    if (building.buildingType === 'Outpost' || building.buildingType === 'Fort') {
+      const fid = building.factionId === 'humans' || building.factionId === 'orcs'
+        ? building.factionId
+        : null;
+      if (fid) {
+        const faction = FACTIONS[fid];
+        let army = 0;
+        for (const e of entities) {
+          if (!(e instanceof Unit) || e.isDead || e.ownerPlayerId !== s.playerId) continue;
+          if (e.unitType !== faction.meleeType && e.unitType !== faction.rangedType) continue;
+          if (Math.hypot(e.x - building.x, e.y - building.y) > 130) continue;
+          army += 1;
+        }
+        if (army > 0) labor += 1.2 + army * 0.35;
+      }
+    }
     const rate = 6 + labor * 4.5;
     building.constructionProgress += rate * dt;
   }
@@ -1178,7 +1371,27 @@ export class SettlementSystem {
     }
 
     if (s.population < recipe.minPopulation) return;
-    if (!s.canAfford(recipe.costs)) return;
+    // Affordability by funding source (treasury vs settlement local).
+    if (recipe.fundingSource === 'treasury') {
+      if (player.gold < treasuryGoldCost(recipe.costs)) return;
+    } else if (recipe.fundingSource === 'mixed') {
+      if (player.gold < recipe.costs.gold) return;
+      const reserve = {
+        wood: this.constructionWoodReserve(),
+        stone: getRecipe('House')?.costs.stone ?? 0,
+        iron: 0,
+      };
+      if (
+        s.wood < recipe.costs.wood + reserve.wood ||
+        s.stone < recipe.costs.stone + reserve.stone ||
+        s.iron < recipe.costs.iron
+      ) {
+        // Fall back: pay mats as treasury gold too.
+        if (player.gold < treasuryGoldCost(recipe.costs)) return;
+      }
+    } else if (!s.canAfford(recipe.costs)) {
+      return;
+    }
 
     // Civic labor gate (builders profession / pool) — replaces idle map workers.
     if (s.civicLabor < recipe.buildersRequired * 0.55) return;
@@ -1199,13 +1412,11 @@ export class SettlementSystem {
         s.queue.cancel(project.id);
         return;
       }
-      if (!s.spendMaterials(recipe.costs)) return;
-      const mp = match.getPlayer(s.playerId);
-      if (mp) mp.gold = s.gold;
+      if (!this.payForRecipe(s, recipe, match, player)) return;
       project.roadTiles = tiles;
       project.roadIndex = 0;
       s.queue.markBuilding(project.id, null);
-      s.buildCooldown = 2;
+      s.buildCooldown = 2 * TAX_POLICY_DEFS[player.taxPolicy].developmentPenalty;
       return;
     }
 
@@ -1269,15 +1480,41 @@ export class SettlementSystem {
     }
     if (!site) return;
 
-    if (!s.spendMaterials(recipe.costs)) return;
-    const mp = match.getPlayer(s.playerId);
-    if (mp) mp.gold = s.gold;
+    if (!this.payForRecipe(s, recipe, match, player)) return;
 
     const building = new Building(site.x, site.y, buildingType, player, false);
     building.settlementId = s.id;
     entities.push(building);
     s.queue.markBuilding(project.id, building.id);
-    s.buildCooldown = 3;
+    s.buildCooldown = 3 * TAX_POLICY_DEFS[player.taxPolicy].developmentPenalty;
+  }
+
+  /** Pay construction costs from treasury and/or settlement local stock. */
+  private payForRecipe(
+    s: Settlement,
+    recipe: import('./ConstructionCatalog').ConstructionRecipe,
+    match: MatchState,
+    player: PlayerState,
+  ): boolean {
+    if (recipe.fundingSource === 'treasury') {
+      return match.trySpend(player.id, treasuryGoldCost(recipe.costs));
+    }
+    if (recipe.fundingSource === 'mixed') {
+      const reserveW = this.constructionWoodReserve();
+      const matsOk =
+        s.wood >= recipe.costs.wood + reserveW &&
+        s.stone >= recipe.costs.stone &&
+        s.iron >= recipe.costs.iron;
+      if (matsOk) {
+        if (!match.trySpend(player.id, recipe.costs.gold)) return false;
+        s.wood -= recipe.costs.wood;
+        s.stone -= recipe.costs.stone;
+        s.iron -= recipe.costs.iron;
+        return true;
+      }
+      return match.trySpend(player.id, treasuryGoldCost(recipe.costs));
+    }
+    return s.spendMaterials(recipe.costs);
   }
 
   private advanceActiveProject(
@@ -1305,7 +1542,7 @@ export class SettlementSystem {
       s.queue.markDone(project.id);
       s.buildCooldown = 2;
     } else if (building instanceof Building) {
-      this.advanceCivicConstruction(s, building, dt);
+      this.advanceCivicConstruction(s, building, entities, dt);
       void player;
     }
   }
@@ -1414,6 +1651,7 @@ export class SettlementSystem {
       camp.food = 25;
       camp.wood = 40;
       camp.stone = 20;
+      camp.gold = 40 + (this.tickRng?.range(0, 20) ?? 10);
 
       const parent = this.getById(group.parentSettlementId);
       if (parent) {

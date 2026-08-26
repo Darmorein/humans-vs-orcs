@@ -4,7 +4,7 @@ import { Camera } from './Engine/Camera';
 import { InputManager } from './Engine/InputManager';
 import { GameMap } from './Map/GameMap';
 import { MapGenerator } from './Map/MapGenerator';
-import { canPlaceBuildingAt, footprintForBuildingType } from './Map/BuildPlacement';
+import { footprintForBuildingType, placementBlockReason } from './Map/BuildPlacement';
 import { Entity } from './Entities/Entity';
 import { Unit } from './Entities/Unit';
 import { Building, isMainBuilding } from './Entities/Building';
@@ -30,6 +30,8 @@ import { civilianVisualAgents } from './Settlement/CivilianVisualAgents';
 import { populationSim, PopulationSim } from './Settlement/Population/PopulationSim';
 import { TIER_DEFS } from './Settlement/SettlementTier';
 import type { SettlementFocus } from './Settlement/SettlementFocus';
+import type { TaxPolicy } from './Players/TaxPolicy';
+import { taxPolicyLabel } from './Players/TaxPolicy';
 import { InfluenceMap } from './Map/InfluenceMap';
 import { SquadSystem } from './Combat/SquadSystem';
 import { HeroSystem } from './Heroes';
@@ -122,6 +124,9 @@ export class Game {
   private simTick = 0;
 
   private placementMode: BuildingType | 'foundSettlement' | 'establishOutpost' | null = null;
+  /** Short-lived player-facing build / place feedback (not serialized). */
+  private buildFeedback: string | null = null;
+  private buildFeedbackTimer = 0;
   private gameState: 'playing' | 'victory' | 'defeat' = 'playing';
 
   private pvpSession: PvpSession | null = null;
@@ -203,6 +208,12 @@ export class Game {
         }
       }
       this.heroSystem.noteStructureRaised(builders, building);
+      if (
+        building.ownerPlayerId === this.match.localPlayerId &&
+        (building.buildingType === 'Outpost' || building.buildingType === 'Fort')
+      ) {
+        this.showBuildFeedback(`${building.buildingType} complete — influence active`);
+      }
     };
     SettlementSystem.onSettlementFounded = (playerId, settlers, camp) => {
       this.heroSystem.noteSettlementFounded(settlers, playerId);
@@ -508,7 +519,7 @@ export class Game {
     if (save.snapshot.softState) {
       this.influenceMap.setAccum(save.snapshot.softState.influenceAccum);
     }
-    this.fog.update(this.entities, this.gameMap, this.match.localPlayerId);
+    this.fog.update(this.entities, this.gameMap, this.match.localPlayerId, this.influenceMap);
     console.info(
       `[Load] tick=${this.simTick} entities=${this.entities.length} cmdsLogged=${save.replay.commands.length}`,
     );
@@ -544,19 +555,31 @@ export class Game {
   public startBuildingPlacement(type: BuildingType) {
     if (this.gameState !== 'playing') return;
     this.placementMode = type;
+    this.showBuildFeedback(`Place ${type} — LMB confirm, RMB cancel`);
   }
 
   public startFoundSettlementPlacement() {
     if (this.gameState !== 'playing') return;
     const local = this.match.localPlayer;
     const group = this.settlementSystem.getSettlerGroup(local.id);
-    if (!group && !this.settlementSystem.canFormSettlerGroup(local.id, local.factionId)) return;
+    if (!group && !this.settlementSystem.canFormSettlerGroup(local.id, local.factionId, this.match)) {
+      this.showBuildFeedback('Cannot found settlement — need Village+, citizens, and caravan costs');
+      return;
+    }
     this.placementMode = 'foundSettlement';
+    this.showBuildFeedback('Found Settlement — click valid land');
   }
 
   public startEstablishOutpostPlacement() {
     if (this.gameState !== 'playing') return;
     this.placementMode = 'establishOutpost';
+    this.showBuildFeedback('Place Outpost — click site (reasons shown if blocked)');
+  }
+
+  /** Toast explaining why a build/place/train action failed. */
+  public showBuildFeedback(message: string, seconds = 3.5) {
+    this.buildFeedback = message;
+    this.buildFeedbackTimer = seconds;
   }
 
   public formSettlerGroup(): boolean {
@@ -571,12 +594,21 @@ export class Game {
 
   public canFormSettlerGroup(): boolean {
     const local = this.match.localPlayer;
-    return this.settlementSystem.canFormSettlerGroup(local.id, local.factionId);
+    return this.settlementSystem.canFormSettlerGroup(local.id, local.factionId, this.match);
   }
 
   public hasReadySettlerGroup(): boolean {
     const g = this.settlementSystem.getSettlerGroup(this.match.localPlayerId);
     return !!g && g.status === 'ready';
+  }
+
+  /** Change Faction Tax Policy (cooldown enforced in applyCommand). */
+  public setTaxPolicy(policy: TaxPolicy) {
+    this.submitCommand({
+      type: 'setTaxPolicy',
+      playerId: this.match.localPlayerId,
+      policy,
+    });
   }
 
   public queueStrategic(type: BuildingType, at: { x: number; y: number }) {
@@ -706,8 +738,10 @@ export class Game {
       s.food = Math.max(s.food, 55);
       s.wood = Math.max(s.wood, 120);
       s.stone = Math.max(s.stone, 70);
+      // Faction Treasury stays on player.gold (200–350 from match setup).
       player.gold = Math.max(player.gold, 200);
-      s.gold = player.gold;
+      // Local settlement gold is independent — seed ~80–120, do not mirror treasury.
+      s.gold = 80 + Math.floor(this.simRng.range(0, 41));
     }
   }
 
@@ -857,6 +891,8 @@ export class Game {
       rng: this.simRng,
       gameMap: this.gameMap,
       artifacts: this.artifactSystem,
+      influence: this.influenceMap,
+      simTick: this.simTick,
     };
     for (const cmd of batch) {
       applyCommand(cmd, world);
@@ -881,7 +917,8 @@ export class Game {
     if (this.placementMode && this.input.mouseLeftPressed) {
       const worldPos = this.camera.screenToWorld(this.input.mousePos.x, this.input.mousePos.y);
       if (this.placementMode === 'foundSettlement') {
-        if (this.canPlaceAt(worldPos.x, worldPos.y, 44)) {
+        const reason = placementBlockReason(worldPos.x, worldPos.y, this.gameMap, this.entities, 44);
+        if (!reason) {
           this.submitCommand({
             type: 'foundSettlement',
             playerId: local.id,
@@ -890,9 +927,21 @@ export class Game {
             formGroupIfNeeded: true,
           });
           this.placementMode = null;
+          this.showBuildFeedback('Settlement expedition ordered');
+        } else {
+          this.showBuildFeedback(`Cannot found here: ${reason}`);
         }
       } else if (this.placementMode === 'establishOutpost') {
-        if (this.canPlaceAt(worldPos.x, worldPos.y, footprintForBuildingType('Outpost', local.factionId))) {
+        const block = this.settlementSystem.establishOutpostBlockReason(
+          local.id,
+          worldPos.x,
+          worldPos.y,
+          this.entities,
+          this.match,
+          this.gameMap,
+          this.influenceMap,
+        );
+        if (!block) {
           this.submitCommand({
             type: 'establishOutpost',
             playerId: local.id,
@@ -900,22 +949,33 @@ export class Game {
             y: worldPos.y,
           });
           this.placementMode = null;
+          this.showBuildFeedback('Outpost site placed — building (keep army nearby)');
+        } else {
+          this.showBuildFeedback(`Cannot place Outpost: ${block}`);
         }
-      } else if (
-        this.canPlaceAt(
+      } else {
+        const foot = footprintForBuildingType(this.placementMode, local.factionId);
+        const reason = placementBlockReason(
           worldPos.x,
           worldPos.y,
-          footprintForBuildingType(this.placementMode, local.factionId),
-        )
-      ) {
-        this.submitCommand({
-          type: 'queueBuilding',
-          playerId: local.id,
-          buildingType: this.placementMode,
-          x: worldPos.x,
-          y: worldPos.y,
-        });
-        this.placementMode = null;
+          this.gameMap,
+          this.entities,
+          foot,
+        );
+        if (!reason) {
+          const queued = this.placementMode;
+          this.submitCommand({
+            type: 'queueBuilding',
+            playerId: local.id,
+            buildingType: this.placementMode,
+            x: worldPos.x,
+            y: worldPos.y,
+          });
+          this.placementMode = null;
+          this.showBuildFeedback(`Queued ${queued}`);
+        } else {
+          this.showBuildFeedback(`Cannot place: ${reason}`);
+        }
       }
     }
 
@@ -923,6 +983,12 @@ export class Game {
       this.selectionSystem.update(this.input, this.camera, this.entities, this.fog);
     } else if (this.input.mouseRightPressed) {
       this.placementMode = null;
+      this.showBuildFeedback('Placement cancelled');
+    }
+
+    if (this.buildFeedbackTimer > 0) {
+      this.buildFeedbackTimer = Math.max(0, this.buildFeedbackTimer - dt);
+      if (this.buildFeedbackTimer <= 0) this.buildFeedback = null;
     }
 
     this.uiManager.update(this.selectionSystem.selectedEntities);
@@ -960,6 +1026,7 @@ export class Game {
         influence: this.influenceMap,
         submitCommand: (cmd: GameCommand) => this.enqueueCommand(cmd),
         rng: this.simRng,
+        simTick: this.simTick,
       };
       for (const controller of this.controllers) {
         controller.update(ctx);
@@ -1028,11 +1095,7 @@ export class Game {
       (e) => !e.isDead,
     );
 
-    this.fog.update(this.entities, this.gameMap, this.match.localPlayerId);
-  }
-
-  private canPlaceAt(x: number, y: number, footprint = 36): boolean {
-    return canPlaceBuildingAt(x, y, this.gameMap, this.entities, footprint);
+    this.fog.update(this.entities, this.gameMap, this.match.localPlayerId, this.influenceMap);
   }
 
   private resolveUnitCollisions() {
@@ -1126,7 +1189,7 @@ export class Game {
 
     const drawList: { depth: number; draw: () => void }[] = [];
     for (const deco of this.gameMap.decorations) {
-      if (!this.fog.isExploredAt(deco.x, deco.y)) continue;
+      if (!this.fog.knowsTerrainAt(deco.x, deco.y)) continue;
       drawList.push({
         depth: isoDepth(deco.x, deco.y),
         draw: () => this.gameMap.drawDecoration(ctx, deco, this.camera),
@@ -1170,7 +1233,19 @@ export class Game {
           : this.placementMode === 'establishOutpost'
             ? footprintForBuildingType('Outpost', this.match.localPlayer.factionId)
             : footprintForBuildingType(this.placementMode, this.match.localPlayer.factionId);
-      const valid = this.canPlaceAt(worldPos.x, worldPos.y, foot);
+      const block =
+        this.placementMode === 'establishOutpost'
+          ? this.settlementSystem.establishOutpostBlockReason(
+              this.match.localPlayerId,
+              worldPos.x,
+              worldPos.y,
+              this.entities,
+              this.match,
+              this.gameMap,
+              this.influenceMap,
+            )
+          : placementBlockReason(worldPos.x, worldPos.y, this.gameMap, this.entities, foot);
+      const valid = block === null;
       if (this.placementMode === 'foundSettlement') {
         ctx.globalAlpha = 0.5;
         drawIsoBox(ctx, screenPos.x, screenPos.y, 46, 22, {
@@ -1182,7 +1257,11 @@ export class Game {
         ctx.fillStyle = valid ? '#C8E6C9' : '#FFCDD2';
         ctx.font = '12px Segoe UI, sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText('Found Settlement Here', screenPos.x, screenPos.y - 36);
+        ctx.fillText(
+          valid ? 'Found Settlement Here' : `Cannot found: ${block}`,
+          screenPos.x,
+          screenPos.y - 36,
+        );
       } else if (this.placementMode === 'establishOutpost') {
         ctx.globalAlpha = 0.5;
         drawIsoBox(ctx, screenPos.x, screenPos.y, foot, 26, {
@@ -1194,7 +1273,11 @@ export class Game {
         ctx.fillStyle = valid ? '#BBDEFB' : '#FFCDD2';
         ctx.font = '12px Segoe UI, sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText('Establish Outpost (army nearby)', screenPos.x, screenPos.y - 36);
+        ctx.fillText(
+          valid ? 'Establish Outpost' : `Cannot place: ${block}`,
+          screenPos.x,
+          screenPos.y - 36,
+        );
       } else {
         const radius = foot;
         const height =
@@ -1206,6 +1289,14 @@ export class Game {
           right: valid ? '#43A047' : '#EF5350',
         });
         ctx.globalAlpha = 1;
+        ctx.fillStyle = valid ? '#C8E6C9' : '#FFCDD2';
+        ctx.font = '12px Segoe UI, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(
+          valid ? `Place ${this.placementMode}` : `Cannot place: ${block}`,
+          screenPos.x,
+          screenPos.y - 36,
+        );
       }
     } else {
       this.selectionSystem.draw(ctx);
@@ -1244,33 +1335,46 @@ export class Game {
     const gold = local.gold;
     const pop = local.pop;
     const maxPop = local.maxPop;
+    const treasuryRate = local.treasuryIncomeRate;
+    const taxLabel = taxPolicyLabel(local.taxPolicy).toUpperCase();
 
     const goldIcon = assets.get('ui/gold');
     const popIcon = assets.get('ui/population');
     if (goldIcon) ctx.drawImage(goldIcon, 14, 6, 28, 28);
-    if (popIcon) ctx.drawImage(popIcon, 150, 6, 28, 28);
+    if (popIcon) ctx.drawImage(popIcon, 210, 6, 28, 28);
 
     ctx.fillStyle = '#F4B51E';
     ctx.font = 'bold 16px Segoe UI, sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText(String(gold), goldIcon ? 46 : 20, 28);
+    ctx.fillText(`Treasury ${Math.floor(gold)}`, goldIcon ? 46 : 20, 22);
+
+    ctx.font = 'bold 11px Segoe UI, sans-serif';
+    ctx.fillStyle = treasuryRate > 0.05 ? '#FFE082' : 'rgba(255, 224, 130, 0.45)';
+    ctx.fillText(
+      `+${treasuryRate.toFixed(1)}/s  Tax: ${taxLabel}`,
+      goldIcon ? 46 : 20,
+      40,
+    );
+
     ctx.fillStyle = '#D7CFB7';
-    ctx.fillText(`${pop}/${maxPop}`, popIcon ? 182 : 160, 28);
+    ctx.font = 'bold 16px Segoe UI, sans-serif';
+    ctx.fillText(`${pop}/${maxPop}`, popIcon ? 242 : 220, 28);
     ctx.font = '12px Segoe UI, sans-serif';
 
     const settlement = this.settlementSystem.get(local.id);
     if (settlement) {
       const need = settlement.topNeed(0.25);
-      const byProf = populationSim.countByProfession(settlement);
-      ctx.fillStyle = 'rgba(215, 207, 183, 0.75)';
+      ctx.fillStyle = 'rgba(215, 207, 183, 0.85)';
       ctx.fillText(
-        `Citizens ${settlement.population}/${settlement.housing}  Food ${Math.floor(settlement.food)}  ` +
-          `${TIER_DEFS[settlement.tier].label}  Safety ${Math.round(settlement.safety * 100)}%` +
-          (need ? `  → ${need}` : ''),
-        280,
+        `Local G${Math.floor(settlement.gold)}(+${settlement.localIncomeRate.toFixed(1)})  ` +
+          `W${Math.floor(settlement.wood)}(+${settlement.incomeRates.wood.toFixed(1)})  ` +
+          `S${Math.floor(settlement.stone)}(+${settlement.incomeRates.stone.toFixed(1)})  ` +
+          `Food ${Math.floor(settlement.food)}(+${settlement.incomeRates.food.toFixed(1)})  ` +
+          `Tax→ +${settlement.taxContributionRate.toFixed(1)}/s`,
+        320,
         20,
       );
-      ctx.fillStyle = 'rgba(215, 207, 183, 0.5)';
+      ctx.fillStyle = 'rgba(215, 207, 183, 0.65)';
       const aiPhase = this.aiControllers[0]?.getPhase();
       const aiReason = this.aiControllers[0]?.getStrategicReason?.();
       const opp = this.match.opponentsOf(local.id)[0];
@@ -1280,12 +1384,13 @@ export class Game {
           : '';
       const seats = this.settlementSystem.allForOwner(local.id).length;
       ctx.fillText(
-        `H${settlement.houseCount} F${settlement.farmCount} S${settlement.storageCount}` +
-          `  Farm${byProf.farmer} Build${byProf.builder} Sold${byProf.soldier}` +
-          `  seats:${seats} atr${Math.round(settlement.migrationAttraction * 100)}` +
-          `  [${settlement.layout.id}]` +
+        `Citizens ${settlement.population}/${settlement.housing}  ` +
+          `${TIER_DEFS[settlement.tier].label}  Safety ${Math.round(settlement.safety * 100)}%` +
+          (need ? `  → ${need}` : '') +
+          `  Outposts ${settlement.outpostCount}` +
+          `  seats:${seats}` +
           (phaseBit ? `   ${phaseBit}` : ''),
-        280,
+        320,
         38,
       );
     }
@@ -1322,6 +1427,21 @@ export class Game {
         14,
         this.renderer.canvas.height - 18,
       );
+    }
+
+    if (this.buildFeedback) {
+      const msg = this.buildFeedback;
+      ctx.font = 'bold 14px Segoe UI, sans-serif';
+      const w = Math.min(this.renderer.canvas.width - 40, ctx.measureText(msg).width + 28);
+      const x = (this.renderer.canvas.width - w) / 2;
+      const y = 64;
+      ctx.fillStyle = 'rgba(20, 18, 12, 0.88)';
+      ctx.fillRect(x, y, w, 28);
+      ctx.strokeStyle = 'rgba(255, 193, 7, 0.65)';
+      ctx.strokeRect(x, y, w, 28);
+      ctx.fillStyle = '#FFE082';
+      ctx.textAlign = 'center';
+      ctx.fillText(msg, this.renderer.canvas.width / 2, y + 19);
     }
   }
 

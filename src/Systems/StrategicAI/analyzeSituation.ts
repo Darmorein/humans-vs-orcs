@@ -180,7 +180,7 @@ export function analyzeStrategicSituation(ctx: AnalyzeContext): StrategicSituati
     : 0.5;
 
   const canExpand =
-    settlements.canFormSettlerGroup(ctx.playerId, player.factionId) ||
+    settlements.canFormSettlerGroup(ctx.playerId, player.factionId, ctx.match) ||
     !!settlements.getSettlerGroup(ctx.playerId);
 
   const expansionCrowding =

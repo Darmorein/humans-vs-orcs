@@ -1,6 +1,7 @@
 import type { BuildingType } from '../Entities/Building';
 import type { SquadFormation } from '../Combat/FormationDefs';
 import type { SettlementFocus } from '../Settlement/SettlementFocus';
+import type { TaxPolicy } from '../Players/TaxPolicy';
 
 /**
  * Player-intent commands — serializable for lockstep / replay / PvP.
@@ -24,7 +25,8 @@ export type GameCommand =
   | UnequipArtifactCommand
   | TransferArtifactCommand
   | SetSettlementFocusCommand
-  | EstablishOutpostCommand;
+  | EstablishOutpostCommand
+  | SetTaxPolicyCommand;
 
 interface CommandBase {
   /** Issuing seat — unambiguous Player ID. */
@@ -142,6 +144,12 @@ export interface EstablishOutpostCommand extends CommandBase {
   type: 'establishOutpost';
   x: number;
   y: number;
+}
+
+/** Change Faction Tax Policy (cooldown gated in applyCommand). */
+export interface SetTaxPolicyCommand extends CommandBase {
+  type: 'setTaxPolicy';
+  policy: TaxPolicy;
 }
 
 export function isGameCommand(v: unknown): v is GameCommand {

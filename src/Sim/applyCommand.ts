@@ -8,10 +8,12 @@ import type { ArtifactSystem } from '../Artifacts/ArtifactSystem';
 import { doctrineOf } from '../Players/FactionDoctrine';
 import { canPlaceBuildingAt, footprintForBuildingType } from '../Map/BuildPlacement';
 import type { GameMap } from '../Map/GameMap';
+import type { InfluenceMap } from '../Map/InfluenceMap';
 import type { GameCommand } from './Commands';
 import type { GameRng } from './GameRng';
 import { getUnitDef, unitSpawnOptions } from './UnitCatalog';
 import { spawnUnitNearBuilding } from './spawnUnit';
+import { isTaxPolicy, TAX_POLICY_COOLDOWN_TICKS } from '../Players/TaxPolicy';
 
 export interface CommandWorld {
   entities: Entity[];
@@ -21,6 +23,9 @@ export interface CommandWorld {
   rng: GameRng;
   gameMap: GameMap;
   artifacts?: ArtifactSystem;
+  influence?: InfluenceMap;
+  /** Current fixed sim tick — used for tax policy cooldown. */
+  simTick?: number;
 }
 
 /**
@@ -74,6 +79,8 @@ export function applyCommand(cmd: GameCommand, world: CommandWorld): boolean {
       return world.settlements.setFocus(cmd.playerId, cmd.settlementId, cmd.focus);
     case 'establishOutpost':
       return applyEstablishOutpost(cmd, world);
+    case 'setTaxPolicy':
+      return applySetTaxPolicy(cmd, world);
     default:
       return false;
   }
@@ -151,18 +158,14 @@ function applyFoundSettlement(
   if (!canPlaceBuildingAt(cmd.x, cmd.y, world.gameMap, world.entities, 44)) return false;
   const player = world.match.getPlayer(cmd.playerId)!;
   void cmd.formGroupIfNeeded;
-  const ok = world.settlements.orderFoundSettlement(
+  return world.settlements.orderFoundSettlement(
     cmd.playerId,
     cmd.x,
     cmd.y,
     world.entities,
     player.factionId,
+    world.match,
   );
-  if (ok) {
-    const s = world.settlements.get(cmd.playerId);
-    if (s) player.gold = s.gold;
-  }
-  return ok;
 }
 
 function applyFormSettler(
@@ -174,11 +177,9 @@ function applyFormSettler(
     cmd.playerId,
     world.entities,
     player.factionId,
+    world.match,
   );
-  if (!g) return false;
-  const s = world.settlements.get(cmd.playerId);
-  if (s) player.gold = s.gold;
-  return true;
+  return !!g;
 }
 
 function applyTrainUnit(
@@ -291,7 +292,27 @@ function applyEstablishOutpost(
     world.entities,
     world.match,
     world.gameMap,
+    world.influence,
   );
+}
+
+function applySetTaxPolicy(
+  cmd: Extract<GameCommand, { type: 'setTaxPolicy' }>,
+  world: CommandWorld,
+): boolean {
+  const player = world.match.getPlayer(cmd.playerId);
+  if (!player || !isTaxPolicy(cmd.policy)) return false;
+  if (player.taxPolicy === cmd.policy) return true;
+  const tick = world.simTick ?? 0;
+  if (
+    player.lastTaxChangeTick > 0 &&
+    tick - player.lastTaxChangeTick < TAX_POLICY_COOLDOWN_TICKS
+  ) {
+    return false;
+  }
+  player.taxPolicy = cmd.policy;
+  player.lastTaxChangeTick = tick;
+  return true;
 }
 
 function applyEquipArtifact(

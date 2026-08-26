@@ -18,6 +18,9 @@ import { doctrineOf } from '../Players/FactionDoctrine';
 import type { SquadSystem } from '../Combat/SquadSystem';
 import type { GameCommand } from '../Sim/Commands';
 import type { GameRng } from '../Sim/GameRng';
+import { TAX_POLICY_COOLDOWN_TICKS, type TaxPolicy } from '../Players/TaxPolicy';
+import { OUTPOST_TREASURY_COST } from '../Settlement/SettlementSystem';
+import { getRecipe, treasuryGoldCost } from '../Settlement/ConstructionCatalog';
 import {
   analyzeStrategicSituation,
   chooseStrategicState,
@@ -57,6 +60,7 @@ export class AISystem {
   private influence: InfluenceMap | null = null;
   private submitCommand: ((cmd: GameCommand) => void) | null = null;
   private rng: GameRng | null = null;
+  private simTick = 0;
 
   public readonly playerId: string;
 
@@ -112,6 +116,7 @@ export class AISystem {
     influence?: InfluenceMap,
     submitCommand?: (cmd: GameCommand) => void,
     rng?: GameRng,
+    simTick?: number,
   ) {
     this.match = match ?? MatchState.current;
     this.settlements = settlements ?? null;
@@ -119,6 +124,7 @@ export class AISystem {
     this.influence = influence ?? null;
     this.submitCommand = submitCommand ?? null;
     this.rng = rng ?? null;
+    if (typeof simTick === 'number') this.simTick = simTick;
     if (!this.match || !this.getPlayer() || !this.settlements || !this.submitCommand || !this.rng) {
       return;
     }
@@ -136,6 +142,7 @@ export class AISystem {
     if (this.thinkTimer >= this.thinkInterval) {
       this.thinkTimer = 0;
       this.reassess(entities, gameMap);
+      this.manageTaxPolicy();
       this.manageEconomyTerritory(entities, gameMap);
       this.manageConstruction(entities, gameMap);
       this.manageTraining(entities);
@@ -274,6 +281,46 @@ export class AISystem {
     return this.getPlayer()?.gold ?? 0;
   }
 
+  /**
+   * Tax policy hysteresis: Recover/Develop → low/normal;
+   * Attack prep → high; low treasury + Attack → war.
+   */
+  private manageTaxPolicy() {
+    const player = this.getPlayer();
+    if (!player) return;
+    if (
+      player.lastTaxChangeTick > 0 &&
+      this.simTick - player.lastTaxChangeTick < TAX_POLICY_COOLDOWN_TICKS
+    ) {
+      return;
+    }
+
+    let desired: TaxPolicy = 'normal';
+    if (this.state === 'recover' || this.state === 'develop' || this.state === 'expand') {
+      desired = this.state === 'recover' ? 'low' : 'normal';
+    } else if (this.state === 'fortify' || this.state === 'defend') {
+      desired = 'normal';
+    } else if (this.state === 'raid' || this.state === 'attack') {
+      desired = player.gold < 120 ? 'war' : 'high';
+    }
+
+    // Mild hysteresis: don't flip war↔low without staying in state a bit.
+    if (desired === player.taxPolicy) return;
+    if (
+      (player.taxPolicy === 'war' || player.taxPolicy === 'high') &&
+      (desired === 'low' || desired === 'normal') &&
+      this.secondsInState < 12
+    ) {
+      return;
+    }
+
+    this.enqueue({
+      type: 'setTaxPolicy',
+      playerId: this.playerId,
+      policy: desired,
+    });
+  }
+
   private getMainBuilding(entities: Entity[]): Building | undefined {
     const faction = this.getFaction();
     if (!faction) return undefined;
@@ -347,7 +394,7 @@ export class AISystem {
     if (!main || !settlement || !player) return;
     if (settlement.outpostCount >= 2) return;
     if (settlement.tier === 'camp' || settlement.tier === 'hamlet') return;
-    if (this.getGold() < 60 || settlement.stone < 40) return;
+    if (this.getGold() < OUTPOST_TREASURY_COST) return;
 
     const military = this.getMilitary(entities);
     if (military.length < 2) return;
@@ -449,9 +496,10 @@ export class AISystem {
     if (!settlement?.hasTownCenter) return;
 
     // Production — needed for any military posture; still player-queue rules.
+    const barracksNeed = this.treasuryNeed(faction.productionBuilding);
     if (
       !sit.hasProduction &&
-      this.getGold() >= 100 &&
+      this.getGold() >= barracksNeed &&
       sit.unitPop >= Math.min(4, Math.max(2, sit.unitMaxPop * 0.4))
     ) {
       this.queueBuildingNearMain(entities, gameMap, main, faction.productionBuilding);
@@ -464,7 +512,7 @@ export class AISystem {
     // Fortify / Defend: walls & forts via the same strategic catalog as the player.
     if (
       (this.state === 'fortify' || this.state === 'defend') &&
-      this.getGold() >= 15 &&
+      this.getGold() >= this.treasuryNeed('Wall') &&
       settlement.population >= 3
     ) {
       if (
@@ -475,7 +523,7 @@ export class AISystem {
         return;
       }
       if (
-        this.getGold() >= 120 &&
+        this.getGold() >= this.treasuryNeed('Fort') &&
         settlement.population >= 6 &&
         !settlement.queue.hasQueuedOrBuilding('Fort') &&
         !entities.some(
@@ -494,7 +542,7 @@ export class AISystem {
       d.craftProsperityBias >= 1.05
     ) {
       if (
-        this.getGold() >= 80 &&
+        this.getGold() >= this.treasuryNeed('Blacksmith') &&
         settlement.population >= 5 &&
         !settlement.queue.hasQueuedOrBuilding('Blacksmith') &&
         !entities.some(
@@ -509,7 +557,7 @@ export class AISystem {
         return;
       }
       if (
-        this.getGold() >= 70 &&
+        this.getGold() >= this.treasuryNeed('Market') &&
         settlement.population >= 4 &&
         !settlement.queue.hasQueuedOrBuilding('Market') &&
         !entities.some(
@@ -525,12 +573,17 @@ export class AISystem {
     // Temple when recovering morale / culture gap
     if (
       this.state === 'recover' &&
-      this.getGold() >= 90 &&
+      this.getGold() >= this.treasuryNeed('Temple') &&
       settlement.population >= 5 &&
       !settlement.queue.hasQueuedOrBuilding('Temple')
     ) {
       this.queueBuildingNearMain(entities, gameMap, main, 'Temple');
     }
+  }
+
+  private treasuryNeed(target: BuildingType | 'Wall' | 'Fort' | 'Blacksmith' | 'Market' | 'Temple'): number {
+    const r = getRecipe(target as BuildingType);
+    return r ? treasuryGoldCost(r.costs) : 100;
   }
 
   private tryExpandSettlement(entities: Entity[], gameMap?: GameMap) {
@@ -553,7 +606,7 @@ export class AISystem {
 
     const primary = this.settlements.get(this.playerId);
     if (!primary?.hasTownCenter) return;
-    if (!this.settlements.canFormSettlerGroup(this.playerId, player.factionId)) return;
+    if (!this.settlements.canFormSettlerGroup(this.playerId, player.factionId, this.match ?? undefined)) return;
 
     const site = this.pickExpansionSite(
       entities,

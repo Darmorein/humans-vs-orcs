@@ -56,6 +56,10 @@ export interface GameStateSnapshot {
     pop: number;
     maxPop: number;
     isDefeated: boolean;
+    taxPolicy?: string;
+    lastTaxChangeTick?: number;
+    treasuryIncomeRate?: number;
+    taxContributions?: Array<{ settlementId: string; label: string; amount: number }>;
   }>;
   entities: Array<{
     id: number;
@@ -186,6 +190,10 @@ export function serializeGameState(args: {
       pop: p.pop,
       maxPop: p.maxPop,
       isDefeated: p.isDefeated,
+      taxPolicy: p.taxPolicy,
+      lastTaxChangeTick: p.lastTaxChangeTick,
+      treasuryIncomeRate: p.treasuryIncomeRate,
+      taxContributions: p.taxContributions.map((c) => ({ ...c })),
     })),
     entities: args.entities.filter((e) => !e.isDead).map((e) => serializeEntity(e)),
     settlements: args.settlements.all().map((s) => ({

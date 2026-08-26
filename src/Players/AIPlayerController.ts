@@ -23,6 +23,7 @@ export class AIPlayerController implements PlayerController {
       ctx.influence,
       ctx.submitCommand,
       ctx.rng,
+      ctx.simTick,
     );
   }
 
