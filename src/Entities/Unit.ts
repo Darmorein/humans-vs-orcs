@@ -1,3 +1,4 @@
+import { AnimationPlayer, resolveUnitVisualPose, warnMissingClipOnce } from '../Assets/Animation';
 import { assets, drawSprite } from '../Assets/Assets';
 import {
   unitAssetMeta,
@@ -20,6 +21,9 @@ import {
   assessHoldPosition,
 } from '../Combat/TacticalTerrain';
 
+/** Presentation-only duration for hit flash / hit clip selection (not saved). */
+const HIT_VISUAL_SECONDS = 0.12;
+
 export class Unit extends Entity {
   public speed: number;
   public targetX: number | null = null;
@@ -33,6 +37,15 @@ export class Unit extends Entity {
   public attackCooldown: number = 1.0;
   private attackTimer: number = 0;
   private isAttackingVisual: number = 0;
+  /** Presentation-only hit flash; not part of save/replay snapshots. */
+  private hitVisual: number = 0;
+  /**
+   * Ephemeral animation playhead. Rebuilds from gameplay cues each tick;
+   * intentionally omitted from save/replay (see ASSET_PIPELINE_V2.md).
+   */
+  private readonly animPlayer = new AnimationPlayer();
+  /** Last releaseFrame pulse from the attack clip (for future VFX/projectiles). */
+  private attackReleasePulse = false;
   public unitType: 'Worker' | 'Swordsman' | 'Archer' | 'Peon' | 'Grunt' | 'SpearOrc';
 
   public gatherTarget: any = null;
@@ -174,6 +187,8 @@ export class Unit extends Entity {
 
     if (this.attackTimer > 0) this.attackTimer -= dt;
     if (this.isAttackingVisual > 0) this.isAttackingVisual -= dt;
+    if (this.hitVisual > 0) this.hitVisual -= dt;
+    this.syncVisualAnimation(dt);
 
     // ROUT: only flee — no aggro / build / gather
     if (this.isRouting) {
@@ -271,8 +286,23 @@ export class Unit extends Entity {
     const inForest = gameMap ? isForestTerrain(gameMap.getTileAt(this.x, this.y).type) : false;
     const key = unitSpriteKey(this.factionId, this.unitType);
     const sprite = key ? assets.get(key) : null;
+    const meta = key ? assets.getMeta(key) : undefined;
     const scale = unitSpriteScale(this.factionId, this.unitType);
-    const spriteH = sprite ? sprite.height * scale : this.bodyRadius() * 2.4;
+
+    let sourceRect: { x: number; y: number; w: number; h: number } | undefined;
+    if (meta?.atlas) {
+      const sample = this.animPlayer.advance(0, meta.atlas);
+      if (sample.sourceRect) {
+        sourceRect = sample.sourceRect;
+      } else if (key) {
+        const pose = resolveUnitVisualPose(this.visualInput());
+        warnMissingClipOnce(key, pose.state, pose.direction);
+      }
+    }
+
+    const spriteH = sprite
+      ? (sourceRect ? sourceRect.h : sprite.height) * scale
+      : this.bodyRadius() * 2.4;
 
     drawIsoEllipse(ctx, screenPos.x, screenPos.y, this.radius + 2, 'rgba(0, 0, 0, 0.28)');
 
@@ -284,7 +314,9 @@ export class Unit extends Entity {
     if (sprite) {
       drawSprite(ctx, sprite, screenPos.x, screenPos.y, scale, {
         pivotY: unitSpritePivotY(this.factionId, this.unitType),
+        pivotX: meta?.pivotX,
         alpha: inForest ? 0.78 : 1,
+        sourceRect,
       });
     } else {
       this.drawFallbackUnit(ctx, screenPos, inForest);
@@ -340,6 +372,40 @@ export class Unit extends Entity {
       ctx.fillRect(screenPos.x - barWidth / 2, barY, barWidth, barHeight);
       ctx.fillStyle = '#0f0';
       ctx.fillRect(screenPos.x - barWidth / 2, barY, barWidth * hpPercent, barHeight);
+    }
+  }
+
+  /**
+   * True once per attack clip when the playhead crosses `releaseFrame`.
+   * Presentation/VFX only — combat damage remains driven by attackTimer.
+   */
+  public consumeAttackReleasePulse(): boolean {
+    const pulse = this.attackReleasePulse;
+    this.attackReleasePulse = false;
+    return pulse;
+  }
+
+  private visualInput() {
+    return {
+      isDead: this.isDead,
+      hitVisualRemaining: this.hitVisual,
+      attackVisualRemaining: this.isAttackingVisual,
+      isMoving: this.path.length > 0 || (this.targetX !== null && this.targetY !== null),
+      facingX: this.facingX,
+      facingY: this.facingY,
+    };
+  }
+
+  /** Advance presentation animation from simulation dt (not wall-clock). */
+  private syncVisualAnimation(dt: number): void {
+    const pose = resolveUnitVisualPose(this.visualInput());
+    this.animPlayer.setClip(pose.state, pose.direction);
+    const key = unitSpriteKey(this.factionId, this.unitType);
+    const atlas = key ? assets.getMeta(key)?.atlas : null;
+    const sample = this.animPlayer.advance(dt, atlas);
+    if (sample.releaseEvent) this.attackReleasePulse = true;
+    if (atlas && !sample.clip && key) {
+      warnMissingClipOnce(key, pose.state, pose.direction);
     }
   }
 
@@ -599,6 +665,9 @@ export class Unit extends Entity {
     }
     const wasAlive = !this.isDead;
     super.takeDamage(dmg, source);
+    if (!this.isDead) {
+      this.hitVisual = HIT_VISUAL_SECONDS;
+    }
     if (wasAlive && this.isDead && Unit.onUnitKilled) {
       Unit.onUnitKilled(this, source ?? null);
     }
