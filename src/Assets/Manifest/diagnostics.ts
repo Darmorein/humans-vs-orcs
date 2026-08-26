@@ -2,14 +2,22 @@ import { buildingSpriteKey } from '../SpriteMap';
 import { assetManifest } from './Registry';
 import { ASSET_PRODUCTION_STANDARDS } from './entries';
 import type { BuildingType } from '../../Entities/Building';
+import { MAP_CONFIG } from '../../Map/MapConfig';
 
 const BUILDING_TYPES: BuildingType[] = [
   'TownHall',
   'Barracks',
   'Farm',
+  'House',
+  'Storage',
   'OrcStronghold',
   'OrcBarracks',
   'PigFarm',
+  'Blacksmith',
+  'Fort',
+  'Temple',
+  'Market',
+  'Wall',
 ];
 
 const UNIT_KEYS = [
@@ -28,9 +36,24 @@ const UNIT_KEYS = [
 export function runManifestGameplayChecks(): void {
   const missing: string[] = [];
 
-  for (const type of BUILDING_TYPES) {
-    const id = buildingSpriteKey(type);
-    if (!assetManifest.has(id)) missing.push(id);
+  for (const factionId of ['humans', 'orcs'] as const) {
+    for (const type of BUILDING_TYPES) {
+      const id = buildingSpriteKey(type, factionId);
+      const entry = assetManifest.get(id);
+      if (!entry) {
+        missing.push(id);
+        continue;
+      }
+      if (
+        entry.category !== 'building' ||
+        entry.footprint.width <= 0 ||
+        entry.footprint.height <= 0 ||
+        entry.collisionFootprint.width <= 0 ||
+        entry.collisionFootprint.height <= 0
+      ) {
+        missing.push(`${id}:invalid-gameplay-geometry`);
+      }
+    }
   }
   for (const id of UNIT_KEYS) {
     if (!assetManifest.has(id)) missing.push(id);
@@ -44,9 +67,16 @@ export function runManifestGameplayChecks(): void {
   }
 
   if (missing.length) {
-    console.warn('[AssetManifest] gameplay coverage gaps:', missing.join(', '));
+    console.warn('[AssetManifest] gameplay coverage gaps:', [...new Set(missing)].join(', '));
   } else {
     console.info('[AssetManifest] gameplay sprite coverage OK');
+  }
+
+  if (MAP_CONFIG.tileSize !== ASSET_PRODUCTION_STANDARDS.space.worldUnitsPerTile) {
+    console.warn(
+      '[AssetManifest] tile-size mismatch:',
+      `map=${MAP_CONFIG.tileSize}, manifest=${ASSET_PRODUCTION_STANDARDS.space.worldUnitsPerTile}`,
+    );
   }
 
   reportProductionReadiness();

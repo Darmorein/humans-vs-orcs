@@ -1,5 +1,11 @@
 import { assets, drawSprite } from '../Assets/Assets';
-import { buildingSpriteKey, buildingSpritePivotY, buildingSpriteScale } from '../Assets/SpriteMap';
+import {
+  buildingAssetMeta,
+  buildingSpriteKey,
+  buildingSpritePivotY,
+  buildingSpriteScale,
+} from '../Assets/SpriteMap';
+import type { TileFootprint } from '../Assets/Manifest';
 import { drawIsoBox, drawIsoDiamond, drawIsoEllipse } from '../Engine/Iso';
 import type { FactionId } from '../Players/Types';
 import { MatchState, type PlayerState } from '../Players/MatchState';
@@ -24,6 +30,7 @@ export class Building extends Entity {
   public buildingType: BuildingType;
   public width: number;
   public height: number;
+  public footprintTiles: TileFootprint;
   public isConstructed: boolean = true;
   public constructionProgress: number = 0;
   public maxConstructionProgress: number = 100;
@@ -80,10 +87,19 @@ export class Building extends Entity {
       maxProgress = 90;
     }
 
+    const meta = buildingAssetMeta(type, owner.factionId);
+    if (meta) {
+      radius = Math.max(meta.collisionFootprint.width, meta.collisionFootprint.height) / 2;
+    }
+
     super(x, y, radius, hp, owner.factionId, owner.id);
     this.buildingType = type;
-    this.width = radius * 2;
-    this.height = radius * 2;
+    this.width = meta?.footprint.width ?? radius * 2;
+    this.height = meta?.footprint.height ?? radius * 2;
+    this.footprintTiles = meta?.footprintTiles
+      ? { ...meta.footprintTiles }
+      : { columns: 1, rows: 1 };
+    this.selectionRadius = meta?.selectionRadius || radius;
 
     this.isConstructed = isConstructed;
     this.maxConstructionProgress = maxProgress;
@@ -109,19 +125,19 @@ export class Building extends Entity {
     if (this.isDead) return;
     const screenPos = camera.worldToScreen(this.x, this.y);
     const sprite = assets.get(buildingSpriteKey(this.buildingType, this.factionId));
-    const scale = buildingSpriteScale(this.buildingType);
+    const scale = buildingSpriteScale(this.buildingType, this.factionId);
     const spriteH = sprite ? sprite.height * scale : this.isoHeight() + this.radius;
 
     drawIsoEllipse(ctx, screenPos.x, screenPos.y, this.radius * 1.8, 'rgba(0, 0, 0, 0.3)');
 
     if (this.selected) {
       const ring = MatchState.current?.getPlayer(this.ownerPlayerId ?? '')?.playerColor ?? '#4FC3F7';
-      drawIsoDiamond(ctx, screenPos.x, screenPos.y, this.radius + 6, undefined, ring);
+      drawIsoDiamond(ctx, screenPos.x, screenPos.y, this.selectionRadius, undefined, ring);
     }
 
     if (sprite) {
       drawSprite(ctx, sprite, screenPos.x, screenPos.y, scale, {
-        pivotY: buildingSpritePivotY(this.buildingType),
+        pivotY: buildingSpritePivotY(this.buildingType, this.factionId),
         alpha: this.isConstructed ? 1 : 0.65,
       });
     } else {

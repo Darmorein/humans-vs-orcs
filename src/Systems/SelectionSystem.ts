@@ -69,7 +69,7 @@ export class SelectionSystem {
           if (!isOwnedBy(entity, localId)) continue;
           const dx = entity.x - worldPos.x;
           const dy = entity.y - worldPos.y;
-          if (dx * dx + dy * dy <= entity.radius * entity.radius) {
+          if (dx * dx + dy * dy <= entity.selectionRadius * entity.selectionRadius) {
             entity.selected = true;
             this.selectedEntities.push(entity);
             break;
@@ -115,7 +115,7 @@ export class SelectionSystem {
         if (entity.isDead || !fog.canTargetEntity(entity)) continue;
         const dx = entity.x - worldPos.x;
         const dy = entity.y - worldPos.y;
-        if (dx * dx + dy * dy > entity.radius * entity.radius * 4) continue;
+        if (dx * dx + dy * dy > entity.selectionRadius * entity.selectionRadius * 4) continue;
 
         if (entity instanceof ResourceNode) {
           clickedResource = entity;

@@ -1,5 +1,10 @@
 import { assets, drawSprite } from '../Assets/Assets';
-import { unitSpriteKey, unitSpritePivotY, unitSpriteScale } from '../Assets/SpriteMap';
+import {
+  unitAssetMeta,
+  unitSpriteKey,
+  unitSpritePivotY,
+  unitSpriteScale,
+} from '../Assets/SpriteMap';
 import { drawIsoEllipse } from '../Engine/Iso';
 import type { GameMap } from '../Map/GameMap';
 import type { PathPoint } from '../Map/Pathfinding';
@@ -88,12 +93,19 @@ export class Unit extends Entity {
   private lastGameMap: GameMap | null = null;
 
   constructor(x: number, y: number, owner: PlayerState, options: any) {
-    super(x, y, 12, options.hp, owner.factionId, owner.id);
+    const unitType = (options.unitType ||
+      (owner.factionId === 'humans' ? 'Worker' : 'Grunt')) as Unit['unitType'];
+    const meta = unitAssetMeta(owner.factionId, unitType);
+    const radius = meta
+      ? Math.max(meta.collisionFootprint.width, meta.collisionFootprint.height) / 2
+      : 12;
+    super(x, y, radius, options.hp, owner.factionId, owner.id);
     this.speed = options.speed || 50;
     this.damage = options.damage || 10;
     this.attackRange = options.range || 35;
     this.attackCooldown = options.attackCooldown || 1.0;
-    this.unitType = options.unitType || (owner.factionId === 'humans' ? 'Worker' : 'Grunt');
+    this.unitType = unitType;
+    this.selectionRadius = meta?.selectionRadius || radius;
   }
 
   public get isRanged(): boolean {
@@ -259,19 +271,19 @@ export class Unit extends Entity {
     const inForest = gameMap ? isForestTerrain(gameMap.getTileAt(this.x, this.y).type) : false;
     const key = unitSpriteKey(this.factionId, this.unitType);
     const sprite = key ? assets.get(key) : null;
-    const scale = unitSpriteScale(this.unitType);
+    const scale = unitSpriteScale(this.factionId, this.unitType);
     const spriteH = sprite ? sprite.height * scale : this.bodyRadius() * 2.4;
 
     drawIsoEllipse(ctx, screenPos.x, screenPos.y, this.radius + 2, 'rgba(0, 0, 0, 0.28)');
 
     if (this.selected) {
       const ring = MatchState.current?.getPlayer(this.ownerPlayerId ?? '')?.playerColor ?? '#4FC3F7';
-      drawIsoEllipse(ctx, screenPos.x, screenPos.y, this.radius + 6, undefined, ring);
+      drawIsoEllipse(ctx, screenPos.x, screenPos.y, this.selectionRadius, undefined, ring);
     }
 
     if (sprite) {
       drawSprite(ctx, sprite, screenPos.x, screenPos.y, scale, {
-        pivotY: unitSpritePivotY(this.unitType),
+        pivotY: unitSpritePivotY(this.factionId, this.unitType),
         alpha: inForest ? 0.78 : 1,
       });
     } else {

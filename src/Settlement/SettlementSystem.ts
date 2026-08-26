@@ -759,7 +759,16 @@ export class SettlementSystem {
         ? { x: project.plannedX, y: project.plannedY, score: 1 }
         : null;
 
-    if (site && !canPlaceBuildingAt(site.x, site.y, gameMap, entities, footprintForBuildingType(buildingType))) {
+    if (
+      site &&
+      !canPlaceBuildingAt(
+        site.x,
+        site.y,
+        gameMap,
+        entities,
+        footprintForBuildingType(buildingType, player.factionId),
+      )
+    ) {
       site = null;
     }
 

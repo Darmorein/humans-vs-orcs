@@ -4,6 +4,8 @@ export abstract class Entity {
   public x: number;
   public y: number;
   public radius: number;
+  /** Click/selection radius; may be wider than the collision body. */
+  public selectionRadius: number;
   public selected: boolean = false;
   public hp: number;
   public maxHp: number;
@@ -27,6 +29,7 @@ export abstract class Entity {
     this.x = x;
     this.y = y;
     this.radius = radius;
+    this.selectionRadius = radius;
     this.hp = hp;
     this.maxHp = hp;
     this.factionId = factionId;
