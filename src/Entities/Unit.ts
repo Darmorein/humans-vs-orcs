@@ -1,5 +1,15 @@
 import { assets, drawSprite } from '../Assets/Assets';
 import {
+  AnimationPlayer,
+  atlasFrameRect,
+  drawAtlasFrame,
+  reportMissingClip,
+  resolveUnitVisualState,
+  worldFacingToIsoDirection,
+  type AnimationEvent,
+} from '../Assets/Animation';
+import type { IsoDirection } from '../Assets/Manifest';
+import {
   unitAssetMeta,
   unitSpriteKey,
   unitSpritePivotY,
@@ -33,6 +43,12 @@ export class Unit extends Entity {
   public attackCooldown: number = 1.0;
   private attackTimer: number = 0;
   private isAttackingVisual: number = 0;
+  private hitVisualTimer: number = 0;
+  private restartAttackAnimation = false;
+  private restartHitAnimation = false;
+  private visualDirection: IsoDirection = 'SE';
+  private readonly visualAnimation = new AnimationPlayer();
+  private visualAnimationEvents: AnimationEvent[] = [];
   public unitType: 'Worker' | 'Swordsman' | 'Archer' | 'Peon' | 'Grunt' | 'SpearOrc';
 
   public gatherTarget: any = null;
@@ -169,11 +185,17 @@ export class Unit extends Entity {
   }
 
   public update(dt: number, entities?: Entity[], gameMap?: GameMap) {
-    if (this.isDead) return;
+    const startX = this.x;
+    const startY = this.y;
+    if (this.isDead) {
+      this.updateVisualAnimation(dt, false);
+      return;
+    }
     if (gameMap) this.lastGameMap = gameMap;
 
     if (this.attackTimer > 0) this.attackTimer -= dt;
     if (this.isAttackingVisual > 0) this.isAttackingVisual -= dt;
+    if (this.hitVisualTimer > 0) this.hitVisualTimer -= dt;
 
     // ROUT: only flee — no aggro / build / gather
     if (this.isRouting) {
@@ -187,6 +209,7 @@ export class Unit extends Entity {
           this.chasePoint(this.targetX, this.targetY, dt, gameMap, entities);
         }
       }
+      this.updateVisualAnimation(dt, this.x !== startX || this.y !== startY);
       return;
     }
 
@@ -244,6 +267,7 @@ export class Unit extends Entity {
             this.targetEntity.takeDamage(this.getEffectiveDamage(gameMap), this);
             this.attackTimer = this.attackCooldown;
             this.isAttackingVisual = 0.1;
+            this.restartAttackAnimation = true;
             this.chargeStrikeReady = false;
           }
           this.clearPath();
@@ -263,6 +287,7 @@ export class Unit extends Entity {
         this.chasePoint(this.targetX, this.targetY, dt, gameMap, entities);
       }
     }
+    this.updateVisualAnimation(dt, this.x !== startX || this.y !== startY);
   }
 
   public draw(ctx: CanvasRenderingContext2D, camera: any, gameMap?: GameMap) {
@@ -271,8 +296,14 @@ export class Unit extends Entity {
     const inForest = gameMap ? isForestTerrain(gameMap.getTileAt(this.x, this.y).type) : false;
     const key = unitSpriteKey(this.factionId, this.unitType);
     const sprite = key ? assets.get(key) : null;
+    const meta = unitAssetMeta(this.factionId, this.unitType);
+    const animationFrame = this.visualAnimation.currentFrameRect();
+    const atlasFallbackFrame = meta?.atlas ? atlasFrameRect(meta.atlas, 0) : null;
+    const frameToDraw = animationFrame ?? atlasFallbackFrame;
     const scale = unitSpriteScale(this.factionId, this.unitType);
-    const spriteH = sprite ? sprite.height * scale : this.bodyRadius() * 2.4;
+    const spriteH = sprite
+      ? (frameToDraw?.height ?? sprite.height) * scale
+      : this.bodyRadius() * 2.4;
 
     drawIsoEllipse(ctx, screenPos.x, screenPos.y, this.radius + 2, 'rgba(0, 0, 0, 0.28)');
 
@@ -282,10 +313,24 @@ export class Unit extends Entity {
     }
 
     if (sprite) {
-      drawSprite(ctx, sprite, screenPos.x, screenPos.y, scale, {
+      const drawOptions = {
+        pivotX: meta?.pivotX ?? 0.5,
         pivotY: unitSpritePivotY(this.factionId, this.unitType),
         alpha: inForest ? 0.78 : 1,
-      });
+      };
+      if (frameToDraw) {
+        drawAtlasFrame(
+          ctx,
+          sprite,
+          frameToDraw,
+          screenPos.x,
+          screenPos.y,
+          scale,
+          drawOptions,
+        );
+      } else {
+        drawSprite(ctx, sprite, screenPos.x, screenPos.y, scale, drawOptions);
+      }
     } else {
       this.drawFallbackUnit(ctx, screenPos, inForest);
     }
@@ -599,9 +644,51 @@ export class Unit extends Entity {
     }
     const wasAlive = !this.isDead;
     super.takeDamage(dmg, source);
+    this.hitVisualTimer = 0.16;
+    this.restartHitAnimation = true;
     if (wasAlive && this.isDead && Unit.onUnitKilled) {
       Unit.onUnitKilled(this, source ?? null);
     }
+  }
+
+  /**
+   * Visual-only events. Gameplay may inspect them in a future integration, but
+   * damage and projectiles intentionally remain authoritative in combat code.
+   */
+  public consumeVisualAnimationEvents(): AnimationEvent[] {
+    const events = this.visualAnimationEvents;
+    this.visualAnimationEvents = [];
+    return events;
+  }
+
+  private updateVisualAnimation(dt: number, isMoving: boolean): void {
+    this.visualDirection = worldFacingToIsoDirection(
+      this.facingX,
+      this.facingY,
+      this.visualDirection,
+    );
+    const state = resolveUnitVisualState({
+      isDead: this.isDead,
+      wasHit: this.hitVisualTimer > 0 || this.restartHitAnimation,
+      isAttacking: this.isAttackingVisual > 0,
+      isMoving,
+    });
+    const meta = unitAssetMeta(this.factionId, this.unitType);
+    const restart =
+      (state === 'attack' && this.restartAttackAnimation) ||
+      (state === 'hit' && this.restartHitAnimation);
+
+    if (meta?.atlas) {
+      const found = this.visualAnimation.play(meta.atlas, state, this.visualDirection, restart);
+      if (!found) reportMissingClip(meta.id, state, this.visualDirection);
+    } else {
+      this.visualAnimation.clear();
+    }
+
+    this.restartAttackAnimation = false;
+    this.restartHitAnimation = false;
+    const result = this.visualAnimation.update(dt);
+    this.visualAnimationEvents = result.events;
   }
 
   private clearPath() {

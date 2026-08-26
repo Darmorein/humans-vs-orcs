@@ -73,6 +73,78 @@ Recommended sheet rules:
 - no baked selection ring or player color;
 - transparent RGBA background.
 
+## Animation runtime
+
+`src/Assets/Animation/` is a visual-only layer between Manifest v2 and unit
+rendering. A clip lookup key is exactly `state + direction`. The initial unit
+state priority is `death`, `hit`, `attack`, `walk`, then `idle`; these states
+only reflect facts already established by gameplay.
+
+The direction adapter reads `Unit.facingX` and `Unit.facingY` in world space.
+The dominant axis maps as follows: `+X → SE`, `+Y → SW`, `-X → NW`, and
+`-Y → NE`. Exact `|X| === |Y|` ties use X, while near-zero vectors keep the
+previous valid direction. Camera position and screen coordinates never affect
+the result.
+
+Animation time advances only through the `dt` supplied to `Unit.update`. The
+runtime does not read wall-clock time, schedule timers or use randomness, so
+the same clip, starting state and delta sequence always produce the same frame.
+Looping clips use modulo progression. One-shot clips hold their final frame and
+report completion without changing gameplay state.
+
+For a zero-based absolute frame index `i`, atlas coordinates are:
+
+```text
+column = i % columns
+row    = floor(i / columns)
+srcX   = margin + column * (frameWidth + spacing)
+srcY   = margin + row    * (frameHeight + spacing)
+```
+
+The drawn source rectangle always uses `frameWidth × frameHeight`. Scale and
+pivot still come from the resolved asset entry.
+
+`releaseFrame` is zero-based within its clip. Crossing it emits one visual
+event per clip execution, including when one large delta crosses several
+frames. Combat damage and projectile creation remain in gameplay code. A later
+combat-presentation PR may consume this event to align a projectile visual,
+but must not make simulation results depend on animation completion.
+
+If `atlas` is null, the renderer uses the existing whole-image `drawSprite`
+path. If a defined atlas lacks the requested `state + direction`, the renderer
+uses its first valid cell instead of accidentally drawing the whole sheet.
+Missing clips in a defined atlas produce one development warning per unique
+`asset + state + direction`; production builds do not log them every frame.
+
+Example atlas metadata:
+
+```ts
+atlas: {
+  frameWidth: 192,
+  frameHeight: 192,
+  columns: 8,
+  rows: 4,
+  margin: 2,
+  spacing: 2,
+  clips: [
+    { state: 'idle', direction: 'SE', startFrame: 0, frameCount: 6, fps: 8, loop: true },
+    {
+      state: 'attack',
+      direction: 'SE',
+      startFrame: 8,
+      frameCount: 8,
+      fps: 12,
+      loop: false,
+      releaseFrame: 4,
+    },
+  ],
+}
+```
+
+The adapter recognizes `death`, but the current entity lifecycle removes dead
+units before the next render. Persistent corpses and visible death playback are
+intentionally deferred to a separate presentation-lifecycle change.
+
 ## Team color
 
 Faction identity and player identity are separate. Human/Orc materials stay

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --test tests/animation.test.ts",
     "validate:assets": "node scripts/validate-asset-manifest.mjs",
     "build": "npm run validate:assets && tsc && vite build",
     "preview": "vite preview",
