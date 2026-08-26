@@ -5,10 +5,15 @@ import { ResourceNode } from '../Entities/ResourceNode';
 import type { MatchState } from '../Players/MatchState';
 import type { SettlementSystem } from '../Settlement/SettlementSystem';
 import type { SquadSystem } from '../Combat/SquadSystem';
-import { isCombatUnitType } from '../Combat/Squad';
+import type { ArtifactSystem } from '../Artifacts/ArtifactSystem';
 import { doctrineOf } from '../Players/FactionDoctrine';
+import { footprintForTarget } from '../Settlement/ConstructionCatalog';
+import { canPlaceBuildingAt } from '../Map/BuildPlacement';
+import type { GameMap } from '../Map/GameMap';
 import type { GameCommand } from './Commands';
 import type { GameRng } from './GameRng';
+import { getUnitDef, unitSpawnOptions } from './UnitCatalog';
+import { spawnUnitNearBuilding } from './spawnUnit';
 
 export interface CommandWorld {
   entities: Entity[];
@@ -16,14 +21,8 @@ export interface CommandWorld {
   settlements: SettlementSystem;
   squads: SquadSystem;
   rng: GameRng;
-  canBuildAt: (x: number, y: number) => boolean;
-  unitOptions: (type: string) => {
-    hp: number;
-    speed: number;
-    unitType: string;
-    damage: number;
-    range: number;
-  };
+  gameMap: GameMap;
+  artifacts?: ArtifactSystem;
 }
 
 /**
@@ -67,6 +66,12 @@ export function applyCommand(cmd: GameCommand, world: CommandWorld): boolean {
       return world.settlements.cancelProject(cmd.playerId, cmd.projectId);
     case 'reorderConstruction':
       return world.settlements.moveProject(cmd.playerId, cmd.projectId, cmd.direction);
+    case 'equipArtifact':
+      return applyEquipArtifact(cmd, world);
+    case 'unequipArtifact':
+      return applyUnequipArtifact(cmd, world);
+    case 'transferArtifact':
+      return applyTransferArtifact(cmd, world);
     default:
       return false;
   }
@@ -125,18 +130,22 @@ function applyQueueBuilding(
   cmd: Extract<GameCommand, { type: 'queueBuilding' }>,
   world: CommandWorld,
 ): boolean {
-  if (cmd.x != null && cmd.y != null && !world.canBuildAt(cmd.x, cmd.y)) return false;
-  const at = cmd.x != null && cmd.y != null ? { x: cmd.x, y: cmd.y } : undefined;
-  return !!world.settlements.enqueueStrategic(cmd.playerId, cmd.buildingType, at);
+  const foot = footprintForTarget(cmd.buildingType);
+  if (!canPlaceBuildingAt(cmd.x, cmd.y, world.gameMap, world.entities, foot)) {
+    return false;
+  }
+  return !!world.settlements.enqueueStrategic(cmd.playerId, cmd.buildingType, {
+    x: cmd.x,
+    y: cmd.y,
+  });
 }
 
 function applyFoundSettlement(
   cmd: Extract<GameCommand, { type: 'foundSettlement' }>,
   world: CommandWorld,
 ): boolean {
-  if (!world.canBuildAt(cmd.x, cmd.y)) return false;
+  if (!canPlaceBuildingAt(cmd.x, cmd.y, world.gameMap, world.entities, 44)) return false;
   const player = world.match.getPlayer(cmd.playerId)!;
-  // SettlementSystem.orderFoundSettlement forms a group when none is ready.
   void cmd.formGroupIfNeeded;
   const ok = world.settlements.orderFoundSettlement(
     cmd.playerId,
@@ -181,23 +190,28 @@ function applyTrainUnit(
   if (!building.isConstructed) return false;
   if (player.pop >= player.maxPop) return false;
 
+  const def = getUnitDef(cmd.unitType);
+  if (!def) return false;
+
   const faction = player.faction;
   const isMilitary =
     cmd.unitType === faction.meleeType || cmd.unitType === faction.rangedType;
   const d = doctrineOf(player.factionId);
-  const paid = Math.floor(cmd.cost * (isMilitary ? d.militaryTrainGoldMul : 1));
+  const paid = Math.floor(def.goldCost * (isMilitary ? d.militaryTrainGoldMul : 1));
   if (!world.match.trySpend(cmd.playerId, paid)) return false;
 
-  const options = world.unitOptions(cmd.unitType);
-  const angle = world.rng.angle();
-  const unit = new Unit(
-    building.x + Math.cos(angle) * 55,
-    building.y + Math.sin(angle) * 55,
+  spawnUnitNearBuilding({
     player,
-    options,
-  );
-  world.entities.push(unit);
-  if (isCombatUnitType(unit.unitType)) world.squads.registerUnit(unit);
+    unitType: cmd.unitType,
+    buildingX: building.x,
+    buildingY: building.y,
+    entities: world.entities,
+    squads: world.squads,
+    rng: world.rng,
+    options: unitSpawnOptions(cmd.unitType),
+    distMin: 55,
+    distMax: 55,
+  });
   return true;
 }
 
@@ -267,4 +281,52 @@ function applyAssistBuild(
     any = true;
   }
   return any;
+}
+
+function applyEquipArtifact(
+  cmd: Extract<GameCommand, { type: 'equipArtifact' }>,
+  world: CommandWorld,
+): boolean {
+  if (!world.artifacts) return false;
+  const unit = world.entities.find(
+    (e): e is Unit => e instanceof Unit && e.id === cmd.unitId && !e.isDead,
+  );
+  if (!unit || unit.ownerPlayerId !== cmd.playerId) return false;
+  return world.artifacts.transferToUnit(cmd.artifactId, unit);
+}
+
+function applyUnequipArtifact(
+  cmd: Extract<GameCommand, { type: 'unequipArtifact' }>,
+  world: CommandWorld,
+): boolean {
+  if (!world.artifacts) return false;
+  const unit = world.entities.find(
+    (e): e is Unit => e instanceof Unit && e.id === cmd.unitId && !e.isDead,
+  );
+  if (!unit || unit.ownerPlayerId !== cmd.playerId) return false;
+  if (!unit.artifactId) return false;
+  world.artifacts.unequipFromUnit(unit, world.settlements);
+  return true;
+}
+
+function applyTransferArtifact(
+  cmd: Extract<GameCommand, { type: 'transferArtifact' }>,
+  world: CommandWorld,
+): boolean {
+  if (!world.artifacts) return false;
+  if (cmd.unitId == null) {
+    const art = world.artifacts.get(cmd.artifactId);
+    if (!art || art.currentOwnerId !== cmd.playerId || art.lost) return false;
+    if (art.boundUnitId == null) return true;
+    const carrier = world.entities.find(
+      (e): e is Unit => e instanceof Unit && e.id === art.boundUnitId,
+    );
+    if (!carrier) return false;
+    world.artifacts.unequipFromUnit(carrier, world.settlements);
+    return true;
+  }
+  return applyEquipArtifact(
+    { type: 'equipArtifact', playerId: cmd.playerId, artifactId: cmd.artifactId, unitId: cmd.unitId },
+    world,
+  );
 }

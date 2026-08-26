@@ -23,14 +23,25 @@ import {
 import { isFlanking, assessHoldPosition } from './TacticalTerrain';
 import { doctrineOf } from '../Players/FactionDoctrine';
 import { preferHeroLeader } from '../Heroes/HeroSystem';
+import type { GameRng } from '../Sim/GameRng';
 
 let nextSquadId = 1;
+
+/** Deterministic ID allocator accessors (save/load). */
+export function getNextSquadId(): number {
+  return nextSquadId;
+}
+export function setNextSquadId(n: number) {
+  nextSquadId = Math.max(1, Math.floor(n));
+}
 
 export interface SquadUpdateContext {
   entities: Entity[];
   gameMap?: GameMap;
   influence?: InfluenceMap;
   match?: MatchState;
+  /** Match sim RNG — preferred; flee jitter uses 0 offset if omitted. */
+  rng?: GameRng;
 }
 
 /**
@@ -62,6 +73,45 @@ export class SquadSystem {
   public clearAll() {
     this.squads.clear();
     nextSquadId = 1;
+  }
+
+  /**
+   * Rebuild squads from a snapshot (Save/Load).
+   * Does not touch the squad id allocator — restore via IdAllocators.
+   */
+  public hydrateFromSnapshot(
+    rows: Array<{
+      id: string;
+      ownerPlayerId: string;
+      unitType: string;
+      memberIds: number[];
+      leaderId: number | null;
+      morale: number;
+      routing: boolean;
+      experience: number;
+      victories: number;
+      formation: SquadFormation;
+      facingX: number;
+      facingY: number;
+    }>,
+  ) {
+    this.squads.clear();
+    for (const row of rows) {
+      if (!isCombatUnitType(row.unitType)) continue;
+      const squad = new Squad(row.id, row.ownerPlayerId, row.unitType, SQUAD_MAX_SIZE);
+      squad.memberIds = [...row.memberIds];
+      squad.leaderId = row.leaderId;
+      squad.morale = row.morale;
+      squad.routing = row.routing;
+      squad.experience = row.experience;
+      squad.victories = row.victories;
+      squad.formation = row.formation;
+      squad.facingX = row.facingX;
+      squad.facingY = row.facingY;
+      squad.lastMemberCount = row.memberIds.length;
+      squad.lastLeaderId = row.leaderId;
+      this.squads.set(squad.id, squad);
+    }
   }
 
   public registerUnit(unit: Unit): Squad | null {
@@ -102,7 +152,7 @@ export class SquadSystem {
 
   public update(dt: number, ctx: SquadUpdateContext | Entity[]) {
     const context: SquadUpdateContext = Array.isArray(ctx) ? { entities: ctx } : ctx;
-    const { entities, gameMap, influence, match } = context;
+    const { entities, gameMap, influence, match, rng } = context;
 
     for (const e of entities) {
       if (e instanceof Unit && isCombatUnitType(e.unitType) && !e.squadId) {
@@ -123,7 +173,7 @@ export class SquadSystem {
       this.tickMoraleAndXp(squad, members, dt, entities, gameMap, influence, match);
       this.applyRoutState(squad, members);
       this.recomputeStats(squad, members);
-      if (squad.routing) this.driveFlee(squad, members, entities);
+      if (squad.routing) this.driveFlee(squad, members, entities, rng);
     }
   }
 
@@ -304,7 +354,12 @@ export class SquadSystem {
     }
   }
 
-  private driveFlee(squad: Squad, members: Unit[], entities: Entity[]) {
+  private driveFlee(
+    squad: Squad,
+    members: Unit[],
+    entities: Entity[],
+    rng?: GameRng,
+  ) {
     const center = squad.centroid(this.unitMap(entities));
     if (!center || members.length === 0) return;
 
@@ -341,7 +396,9 @@ export class SquadSystem {
         u.targetX == null ||
         Math.hypot((u.targetX ?? 0) - destX, (u.targetY ?? 0) - destY) > 80
       ) {
-        u.moveCommand(destX + (Math.random() - 0.5) * 40, destY + (Math.random() - 0.5) * 40);
+        const jx = rng ? rng.range(-20, 20) : 0;
+        const jy = rng ? rng.range(-20, 20) : 0;
+        u.moveCommand(destX + jx, destY + jy);
       }
     }
   }

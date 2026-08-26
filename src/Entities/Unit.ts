@@ -468,7 +468,14 @@ export class Unit extends Entity {
   ) {
     if (gameMap) {
       if (this.path.length === 0 || this.pathIndex >= this.path.length) {
-        this.path = gameMap.findPath(this.x, this.y, gx, gy);
+        this.path = gameMap.findPath(
+          this.x,
+          this.y,
+          gx,
+          gy,
+          entities,
+          this.buildTarget instanceof Building ? this.buildTarget : null,
+        );
         this.pathIndex = 0;
       }
 
@@ -510,14 +517,40 @@ export class Unit extends Entity {
     if (this.canOccupy(nx, ny, gameMap, entities)) {
       this.x = nx;
       this.y = ny;
-    } else if (this.canOccupy(nx, this.y, gameMap, entities)) {
+      return;
+    }
+    if (this.canOccupy(nx, this.y, gameMap, entities)) {
       this.x = nx;
       this.clearPath();
-    } else if (this.canOccupy(this.x, ny, gameMap, entities)) {
+      return;
+    }
+    if (this.canOccupy(this.x, ny, gameMap, entities)) {
       this.y = ny;
       this.clearPath();
-    } else {
-      this.clearPath();
+      return;
+    }
+
+    // Fully blocked — drop path so next tick replans around buildings/terrain.
+    this.clearPath();
+    // Nudge off solids if overlapping a building (escape stuck).
+    if (entities) {
+      for (const e of entities) {
+        if (!(e instanceof Building) || e.isDead) continue;
+        if (this.buildTarget === e) continue;
+        const ddx = this.x - e.x;
+        const ddy = this.y - e.y;
+        const d = Math.hypot(ddx, ddy);
+        const min = this.radius * 0.45 + e.radius * 0.88;
+        if (d < min && d > 0.01) {
+          const tx = e.x + (ddx / d) * (min + 4);
+          const ty = e.y + (ddy / d) * (min + 4);
+          if (this.canOccupy(tx, ty, gameMap, entities)) {
+            this.x = tx;
+            this.y = ty;
+          }
+          break;
+        }
+      }
     }
   }
 

@@ -1,6 +1,6 @@
 import { Entity } from '../Entities/Entity';
 import { Unit } from '../Entities/Unit';
-import { Building, isMainBuilding, isEconomyBuilding } from '../Entities/Building';
+import { Building, isMainBuilding, isEconomyBuilding, type BuildingType } from '../Entities/Building';
 import { ResourceNode } from '../Entities/ResourceNode';
 import type { GameMap } from '../Map/GameMap';
 import { canPlaceBuildingAt } from '../Map/BuildPlacement';
@@ -16,6 +16,8 @@ import {
 } from '../Combat/TacticalTerrain';
 import { doctrineOf } from '../Players/FactionDoctrine';
 import type { SquadSystem } from '../Combat/SquadSystem';
+import type { GameCommand } from '../Sim/Commands';
+import type { GameRng } from '../Sim/GameRng';
 import {
   analyzeStrategicSituation,
   chooseStrategicState,
@@ -24,14 +26,9 @@ import {
   type StrategicState,
 } from './StrategicAI';
 
-type TrainableUnit =
-  | FactionDefinition['workerType']
-  | FactionDefinition['meleeType']
-  | FactionDefinition['rangedType'];
-
 /**
  * Strategic AI for any faction seat.
- * Uses the same settlement queue, settlers, gold training, and buildings as the player.
+ * Issues GameCommands only — never mutates units/buildings/economy for orders.
  * Posture comes from world analysis — not fixed "spawn N every T seconds".
  */
 export class AISystem {
@@ -58,6 +55,8 @@ export class AISystem {
   private settlements: SettlementSystem | null = null;
   private squads: SquadSystem | null = null;
   private influence: InfluenceMap | null = null;
+  private submitCommand: ((cmd: GameCommand) => void) | null = null;
+  private rng: GameRng | null = null;
 
   public readonly playerId: string;
 
@@ -73,12 +72,18 @@ export class AISystem {
     settlements?: SettlementSystem,
     squads?: SquadSystem,
     influence?: InfluenceMap,
+    submitCommand?: (cmd: GameCommand) => void,
+    rng?: GameRng,
   ) {
     this.match = match ?? MatchState.current;
     this.settlements = settlements ?? null;
     this.squads = squads ?? null;
     this.influence = influence ?? null;
-    if (!this.match || !this.getPlayer() || !this.settlements) return;
+    this.submitCommand = submitCommand ?? null;
+    this.rng = rng ?? null;
+    if (!this.match || !this.getPlayer() || !this.settlements || !this.submitCommand || !this.rng) {
+      return;
+    }
 
     this.elapsed += dt;
     this.thinkTimer += dt;
@@ -95,7 +100,7 @@ export class AISystem {
       this.thinkTimer = 0;
       this.reassess(entities, gameMap);
       this.manageWorkers(entities);
-      this.manageConstruction(entities);
+      this.manageConstruction(entities, gameMap);
       this.manageTraining(entities);
       this.tryExpandSettlement(entities, gameMap);
       this.positionGuards(entities, gameMap);
@@ -108,6 +113,58 @@ export class AISystem {
         this.nextActionIn = this.scheduleNextAction();
       }
     }
+  }
+
+  private enqueue(cmd: GameCommand) {
+    this.submitCommand?.(cmd);
+  }
+
+  private orderMove(unit: Unit, x: number, y: number, seenSquads?: Set<string>) {
+    const squad = this.squads?.getForUnit(unit);
+    if (squad) {
+      if (seenSquads) {
+        if (seenSquads.has(squad.id)) return;
+        seenSquads.add(squad.id);
+      }
+      this.enqueue({
+        type: 'moveSquad',
+        playerId: this.playerId,
+        squadId: squad.id,
+        x,
+        y,
+      });
+      return;
+    }
+    this.enqueue({
+      type: 'moveAgents',
+      playerId: this.playerId,
+      unitIds: [unit.id],
+      x,
+      y,
+    });
+  }
+
+  private orderAttack(unit: Unit, target: Entity, seenSquads?: Set<string>) {
+    const squad = this.squads?.getForUnit(unit);
+    if (squad) {
+      if (seenSquads) {
+        if (seenSquads.has(squad.id)) return;
+        seenSquads.add(squad.id);
+      }
+      this.enqueue({
+        type: 'attack',
+        playerId: this.playerId,
+        squadId: squad.id,
+        targetEntityId: target.id,
+      });
+      return;
+    }
+    this.enqueue({
+      type: 'attack',
+      playerId: this.playerId,
+      unitIds: [unit.id],
+      targetEntityId: target.id,
+    });
   }
 
   private reassess(entities: Entity[], gameMap?: GameMap) {
@@ -154,21 +211,22 @@ export class AISystem {
   }
 
   private scheduleNextAction(): number {
+    const rng = this.rng!;
     const d = doctrineOf(this.getFaction()?.id ?? 'orcs');
     const base = (() => {
       switch (this.state) {
         case 'develop':
         case 'expand':
         case 'recover':
-          return 36 + Math.random() * 14;
+          return 36 + rng.next() * 14;
         case 'fortify':
-          return 28 + Math.random() * 10;
+          return 28 + rng.next() * 10;
         case 'defend':
-          return 16 + Math.random() * 8;
+          return 16 + rng.next() * 8;
         case 'raid':
-          return 22 + Math.random() * 10;
+          return 22 + rng.next() * 10;
         case 'attack':
-          return 14 + Math.random() * 8;
+          return 14 + rng.next() * 8;
       }
     })();
     return base * d.aiActionIntervalMul;
@@ -176,10 +234,6 @@ export class AISystem {
 
   private getGold(): number {
     return this.getPlayer()?.gold ?? 0;
-  }
-
-  private trySpend(amount: number): boolean {
-    return this.match?.trySpend(this.playerId, amount) ?? false;
   }
 
   private getMainBuilding(entities: Entity[]): Building | undefined {
@@ -263,7 +317,12 @@ export class AISystem {
 
       const mine = mines[mineIndex % mines.length]!;
       mineIndex++;
-      worker.gatherCommand(mine);
+      this.enqueue({
+        type: 'gather',
+        playerId: this.playerId,
+        unitIds: [worker.id],
+        resourceEntityId: mine.id,
+      });
     }
   }
 
@@ -298,8 +357,14 @@ export class AISystem {
 
       const distHome = Math.hypot(worker.x - main.x, worker.y - main.y);
       if (distHome < 90) {
-        worker.gatherTarget = null;
-        worker.buildTarget = null;
+        // Move toward home clears gather/build when applied.
+        this.enqueue({
+          type: 'moveAgents',
+          playerId: this.playerId,
+          unitIds: [worker.id],
+          x: main.x + 40,
+          y: main.y + 40,
+        });
         continue;
       }
 
@@ -310,13 +375,57 @@ export class AISystem {
         continue;
       }
 
-      worker.gatherTarget = null;
-      worker.buildTarget = null;
-      worker.moveCommand(main.x + 40, main.y + 40);
+      this.enqueue({
+        type: 'moveAgents',
+        playerId: this.playerId,
+        unitIds: [worker.id],
+        x: main.x + 40,
+        y: main.y + 40,
+      });
     }
   }
 
-  private manageConstruction(entities: Entity[]) {
+  private pickBuildSite(
+    entities: Entity[],
+    gameMap: GameMap,
+    main: Building,
+  ): { x: number; y: number } | null {
+    const offsets = [
+      { x: main.x + 80, y: main.y + 40 },
+      { x: main.x - 80, y: main.y + 40 },
+      { x: main.x + 80, y: main.y - 40 },
+      { x: main.x - 60, y: main.y - 60 },
+      { x: main.x + 100, y: main.y },
+      { x: main.x, y: main.y + 100 },
+      { x: main.x - 100, y: main.y + 20 },
+      { x: main.x + 40, y: main.y - 100 },
+    ];
+    for (const c of offsets) {
+      if (canPlaceBuildingAt(c.x, c.y, gameMap, entities, 40)) return c;
+    }
+    return this.pickExpansionSite(entities, gameMap, main.x, main.y, 1);
+  }
+
+  private queueBuildingNearMain(
+    entities: Entity[],
+    gameMap: GameMap | undefined,
+    main: Building,
+    buildingType: BuildingType,
+  ): boolean {
+    if (!gameMap) return false;
+    const site = this.pickBuildSite(entities, gameMap, main);
+    if (!site) return false;
+    this.enqueue({
+      type: 'queueBuilding',
+      playerId: this.playerId,
+      buildingType,
+      x: site.x,
+      y: site.y,
+    });
+    return true;
+  }
+
+  private manageConstruction(entities: Entity[], gameMap?: GameMap) {
     const faction = this.getFaction();
     const player = this.getPlayer();
     const main = this.getMainBuilding(entities);
@@ -341,7 +450,7 @@ export class AISystem {
       this.getGold() >= 100 &&
       sit.unitPop >= Math.min(4, Math.max(2, sit.unitMaxPop * 0.4))
     ) {
-      this.settlements?.enqueueStrategic(this.playerId, faction.productionBuilding);
+      this.queueBuildingNearMain(entities, gameMap, main, faction.productionBuilding);
       return;
     }
 
@@ -358,7 +467,7 @@ export class AISystem {
         !settlement.queue.hasQueuedOrBuilding('Wall') &&
         (sit.primaryBridgeContested || sit.safety < 0.55 || this.state === 'fortify')
       ) {
-        this.settlements?.enqueueStrategic(this.playerId, 'Wall');
+        this.queueBuildingNearMain(entities, gameMap, main, 'Wall');
         return;
       }
       if (
@@ -370,7 +479,7 @@ export class AISystem {
             e instanceof Building && e.buildingType === 'Fort' && !e.isDead && this.isOwn(e),
         )
       ) {
-        this.settlements?.enqueueStrategic(this.playerId, 'Fort');
+        this.queueBuildingNearMain(entities, gameMap, main, 'Fort');
         return;
       }
     }
@@ -392,7 +501,7 @@ export class AISystem {
             this.isOwn(e),
         )
       ) {
-        this.settlements?.enqueueStrategic(this.playerId, 'Blacksmith');
+        this.queueBuildingNearMain(entities, gameMap, main, 'Blacksmith');
         return;
       }
       if (
@@ -404,7 +513,7 @@ export class AISystem {
             e instanceof Building && e.buildingType === 'Market' && !e.isDead && this.isOwn(e),
         )
       ) {
-        this.settlements?.enqueueStrategic(this.playerId, 'Market');
+        this.queueBuildingNearMain(entities, gameMap, main, 'Market');
         return;
       }
     }
@@ -416,7 +525,7 @@ export class AISystem {
       settlement.population >= 5 &&
       !settlement.queue.hasQueuedOrBuilding('Temple')
     ) {
-      this.settlements?.enqueueStrategic(this.playerId, 'Temple');
+      this.queueBuildingNearMain(entities, gameMap, main, 'Temple');
     }
   }
 
@@ -451,18 +560,14 @@ export class AISystem {
     );
     if (!site) return;
 
-    const ok = this.settlements.orderFoundSettlement(
-      this.playerId,
-      site.x,
-      site.y,
-      entities,
-      player.factionId,
-    );
-    if (ok) {
-      this.expansionCooldown = 75 / Math.max(0.5, d.expansionPressure);
-      const s = this.settlements.get(this.playerId);
-      if (s) player.gold = s.gold;
-    }
+    this.enqueue({
+      type: 'foundSettlement',
+      playerId: this.playerId,
+      x: site.x,
+      y: site.y,
+      formGroupIfNeeded: true,
+    });
+    this.expansionCooldown = 75 / Math.max(0.5, d.expansionPressure);
   }
 
   private pickExpansionSite(
@@ -472,16 +577,17 @@ export class AISystem {
     cy: number,
     pressure: number,
   ): { x: number; y: number } | null {
+    const rng = this.rng!;
     const enemyMain = this.getEnemyMainBuilding(entities);
     const preferTowardEnemy = pressure > 1 && this.state === 'expand';
     const baseAngle = enemyMain
       ? Math.atan2(enemyMain.y - cy, enemyMain.x - cx)
-      : Math.random() * Math.PI * 2;
-    const dist = preferTowardEnemy ? 280 + Math.random() * 120 : 220 + Math.random() * 160;
+      : rng.angle();
+    const dist = preferTowardEnemy ? 280 + rng.next() * 120 : 220 + rng.next() * 160;
 
     for (let i = 0; i < 12; i++) {
       const a = preferTowardEnemy
-        ? baseAngle + (Math.random() - 0.5) * 0.9
+        ? baseAngle + (rng.next() - 0.5) * 0.9
         : baseAngle + (i / 12) * Math.PI * 2;
       const x = cx + Math.cos(a) * dist;
       const y = cy + Math.sin(a) * (dist * 0.85);
@@ -502,7 +608,12 @@ export class AISystem {
       const squad = this.squads.getForUnit(u);
       if (!squad || seen.has(squad.id)) continue;
       seen.add(squad.id);
-      this.squads.setFormation(squad, formation);
+      this.enqueue({
+        type: 'changeFormation',
+        playerId: this.playerId,
+        squadId: squad.id,
+        formation,
+      });
     }
   }
 
@@ -516,14 +627,19 @@ export class AISystem {
         continue;
       }
       if (worker.buildTarget || worker.targetEntity) continue;
-      worker.buildCommand(building);
+      this.enqueue({
+        type: 'assistBuild',
+        playerId: this.playerId,
+        unitIds: [worker.id],
+        buildingId: building.id,
+      });
       assigned++;
     }
   }
 
   /**
    * Train to close gaps vs situation — workers when developing, military when threatened.
-   * Costs go through MatchState.trySpend (same as the local player).
+   * Costs are resolved when TrainUnitCommand is applied (UnitCatalog + doctrine).
    */
   private manageTraining(entities: Entity[]) {
     const faction = this.getFaction();
@@ -545,7 +661,12 @@ export class AISystem {
         workers < 3);
 
     if (needWorkers && this.getGold() >= 50) {
-      this.spawnUnit(entities, main, faction.workerType, 50);
+      this.enqueue({
+        type: 'trainUnit',
+        playerId: this.playerId,
+        buildingId: main.id,
+        unitType: faction.workerType,
+      });
       return;
     }
 
@@ -563,9 +684,19 @@ export class AISystem {
 
     const preferRanged = this.shouldTrainRanged(entities, faction, military);
     if (preferRanged && this.getGold() >= 100) {
-      this.spawnUnit(entities, barracks, faction.rangedType, 100);
+      this.enqueue({
+        type: 'trainUnit',
+        playerId: this.playerId,
+        buildingId: barracks.id,
+        unitType: faction.rangedType,
+      });
     } else {
-      this.spawnUnit(entities, barracks, faction.meleeType, 80);
+      this.enqueue({
+        type: 'trainUnit',
+        playerId: this.playerId,
+        buildingId: barracks.id,
+        unitType: faction.meleeType,
+      });
     }
   }
 
@@ -635,50 +766,6 @@ export class AISystem {
     return prefer;
   }
 
-  private spawnUnit(
-    entities: Entity[],
-    building: Building,
-    type: TrainableUnit,
-    cost: number,
-  ) {
-    const player = this.getPlayer();
-    if (!player) return;
-    const faction = this.getFaction();
-    const d = doctrineOf(player.factionId);
-    const isMilitary =
-      !!faction && (type === faction.meleeType || type === faction.rangedType);
-    const paid = Math.floor(cost * (isMilitary ? d.militaryTrainGoldMul : 1));
-    if (!this.trySpend(paid)) return;
-
-    const options = this.unitOptions(type);
-    const angle = Math.random() * Math.PI * 2;
-    const dist = 55 + Math.random() * 25;
-    entities.push(
-      new Unit(
-        building.x + Math.cos(angle) * dist,
-        building.y + Math.sin(angle) * dist,
-        player,
-        options,
-      ),
-    );
-  }
-
-  private unitOptions(type: TrainableUnit) {
-    switch (type) {
-      case 'Worker':
-      case 'Peon':
-        return { hp: 40, speed: 70, unitType: type, damage: 3, range: 25 };
-      case 'Swordsman':
-        return { hp: 100, speed: 60, unitType: type, damage: 15, range: 25 };
-      case 'Grunt':
-        return { hp: 130, speed: 52, unitType: type, damage: 18, range: 28 };
-      case 'Archer':
-        return { hp: 60, speed: 60, unitType: type, damage: 10, range: 150 };
-      case 'SpearOrc':
-        return { hp: 80, speed: 56, unitType: type, damage: 11, range: 120 };
-    }
-  }
-
   // --- Defense -----------------------------------------------------------
 
   private findThreatsNear(
@@ -708,6 +795,7 @@ export class AISystem {
     const threats = this.findThreatsNear(entities, main.x, main.y, radius, main);
     if (threats.length === 0) return;
 
+    const seenSquads = new Set<string>();
     for (const unit of this.getMilitary(entities)) {
       if (this.state === 'defend' && (this.assaultIds.has(unit.id) || this.harassIds.has(unit.id))) {
         this.assaultIds.delete(unit.id);
@@ -728,7 +816,7 @@ export class AISystem {
         }
       }
       if (closest) {
-        unit.attackCommand(closest);
+        this.orderAttack(unit, closest, seenSquads);
         this.guardIds.add(unit.id);
       }
     }
@@ -770,6 +858,7 @@ export class AISystem {
       guards = military.filter((u) => this.guardIds.has(u.id));
     }
 
+    const seenSquads = new Set<string>();
     for (const guard of guards) {
       if (guard.targetEntity && !guard.targetEntity.isDead) continue;
 
@@ -792,7 +881,7 @@ export class AISystem {
       });
       const stand = best ?? homeSide;
       if (Math.hypot(guard.x - stand.x, guard.y - stand.y) > 70) {
-        guard.moveCommand(stand.x, stand.y);
+        this.orderMove(guard, stand.x, stand.y, seenSquads);
       }
     }
   }
@@ -812,6 +901,7 @@ export class AISystem {
     const military = this.getMilitary(entities);
     const free = military.filter((u) => !this.guardIds.has(u.id));
     const sit = this.situation;
+    const rng = this.rng!;
 
     if (this.state === 'defend') {
       // Light counter-raid only when we still have spare force at home.
@@ -821,7 +911,7 @@ export class AISystem {
 
     if (this.state === 'raid') {
       const size = sit && sit.armyRatio >= 1.0 ? 3 : 2;
-      if (free.length >= 4 && Math.random() < (sit?.doctrineHarass ?? 0.5) * 0.35) {
+      if (free.length >= 4 && rng.chance((sit?.doctrineHarass ?? 0.5) * 0.35)) {
         return this.launchAssault(entities, free, gameMap, false);
       }
       return this.launchHarass(entities, free, gameMap, size);
@@ -854,6 +944,8 @@ export class AISystem {
       waypoint = gameMap.findAlternateBridge(primary) ?? primary;
     }
 
+    const seenMove = new Set<string>();
+    const seenAttack = new Set<string>();
     for (const unit of squad) {
       this.harassIds.add(unit.id);
       this.assaultIds.delete(unit.id);
@@ -867,7 +959,7 @@ export class AISystem {
           enemiesNearby: enemies,
         });
         if (best && best.assessment.total >= 8) {
-          unit.moveCommand(best.x, best.y);
+          this.orderMove(unit, best.x, best.y, seenMove);
           this.pendingTargetId.set(unit.id, target.id);
           continue;
         }
@@ -882,10 +974,10 @@ export class AISystem {
           const scored = pickBestHoldPoint(gameMap, opts, { enemiesNearby: 2 });
           if (scored) dest = scored;
         }
-        unit.moveCommand(dest.x, dest.y);
+        this.orderMove(unit, dest.x, dest.y, seenMove);
         this.pendingTargetId.set(unit.id, target.id);
       } else {
-        unit.attackCommand(target);
+        this.orderAttack(unit, target, seenAttack);
         this.pendingTargetId.delete(unit.id);
       }
     }
@@ -926,6 +1018,9 @@ export class AISystem {
       waypoint = gameMap.findAlternateBridge(bridge) ?? bridge;
     }
 
+    const rng = this.rng!;
+    const seenMove = new Set<string>();
+    const seenAttack = new Set<string>();
     for (const unit of squad) {
       this.assaultIds.add(unit.id);
       this.harassIds.delete(unit.id);
@@ -943,7 +1038,7 @@ export class AISystem {
           best.assessment.total >= 10 &&
           Math.hypot(unit.x - target.x, unit.y - target.y) > 220
         ) {
-          unit.moveCommand(best.x, best.y);
+          this.orderMove(unit, best.x, best.y, seenMove);
           this.pendingTargetId.set(unit.id, target.id);
           continue;
         }
@@ -960,13 +1055,15 @@ export class AISystem {
           });
           if (scored) dest = scored;
         }
-        unit.moveCommand(
-          dest.x + (Math.random() - 0.5) * 30,
-          dest.y + (Math.random() - 0.5) * 30,
+        this.orderMove(
+          unit,
+          dest.x + (rng.next() - 0.5) * 30,
+          dest.y + (rng.next() - 0.5) * 30,
+          seenMove,
         );
         this.pendingTargetId.set(unit.id, target.id);
       } else {
-        unit.attackCommand(target);
+        this.orderAttack(unit, target, seenAttack);
         this.pendingTargetId.delete(unit.id);
       }
     }
@@ -986,6 +1083,7 @@ export class AISystem {
 
   private advanceWaypoints(entities: Entity[]) {
     const byId = new Map(entities.map((e) => [e.id, e]));
+    const seenAttack = new Set<string>();
 
     for (const unit of this.getMilitary(entities)) {
       const pendingId = this.pendingTargetId.get(unit.id);
@@ -998,7 +1096,7 @@ export class AISystem {
       }
 
       const target = byId.get(pendingId);
-      if (target && !target.isDead) unit.attackCommand(target);
+      if (target && !target.isDead) this.orderAttack(unit, target, seenAttack);
       this.pendingTargetId.delete(unit.id);
     }
   }
@@ -1021,13 +1119,14 @@ export class AISystem {
         ? gameMap.findBridgeToward(main.x, main.y, enemyMain.x, enemyMain.y)
         : null;
 
+    const seenMove = new Set<string>();
     for (const unit of assault) {
       this.assaultIds.delete(unit.id);
       this.harassIds.delete(unit.id);
       this.guardIds.add(unit.id);
       this.pendingTargetId.delete(unit.id);
-      if (bridge) unit.moveCommand(bridge.x, bridge.y);
-      else unit.moveCommand(main.x, main.y);
+      if (bridge) this.orderMove(unit, bridge.x, bridge.y, seenMove);
+      else this.orderMove(unit, main.x, main.y, seenMove);
     }
 
     this.assaultStartCount = 0;

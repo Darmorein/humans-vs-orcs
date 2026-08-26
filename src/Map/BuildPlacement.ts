@@ -1,6 +1,7 @@
 import { Building } from '../Entities/Building';
 import type { Entity } from '../Entities/Entity';
 import { ResourceNode } from '../Entities/ResourceNode';
+import { footprintForTarget } from '../Settlement/ConstructionCatalog';
 import type { GameMap } from './GameMap';
 
 /**
@@ -16,7 +17,6 @@ export function canPlaceBuildingAt(
 ): boolean {
   if (!gameMap.canBuildAt(x, y)) return false;
 
-  // Sample ring so large footprints don't sit half on water/rock.
   const samples = 6;
   for (let i = 0; i < samples; i++) {
     const a = (i / samples) * Math.PI * 2;
@@ -37,11 +37,7 @@ export function canPlaceBuildingAt(
   return true;
 }
 
-/** Default clearance radius for a building type (world units). */
+/** Prefer ConstructionCatalog.footprintForTarget — kept for call-site compatibility. */
 export function footprintForBuildingType(type: string): number {
-  if (type === 'TownHall' || type === 'OrcStronghold' || type === 'Fort') return 48;
-  if (type === 'Barracks' || type === 'OrcBarracks') return 40;
-  if (type === 'House' || type === 'Wall') return 28;
-  if (type === 'Farm' || type === 'PigFarm') return 32;
-  return 36;
+  return footprintForTarget(type);
 }
