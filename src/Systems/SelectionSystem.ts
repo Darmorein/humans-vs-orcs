@@ -1,0 +1,250 @@
+import { InputManager } from '../Engine/InputManager';
+import { Camera } from '../Engine/Camera';
+import { Entity } from '../Entities/Entity';
+import { Unit } from '../Entities/Unit';
+import { Building } from '../Entities/Building';
+import { ResourceNode } from '../Entities/ResourceNode';
+import { MatchState } from '../Players/MatchState';
+import { isOwnedBy } from '../Players/Relations';
+import type { FogOfWar } from './FogOfWar';
+import type { SquadSystem } from '../Combat/SquadSystem';
+import { isCombatUnitType } from '../Combat/Squad';
+import type { GameCommand } from '../Sim/Commands';
+
+export type CommandSink = (cmd: GameCommand) => void;
+
+/**
+ * Local selection & order *intent*. Combat/worker orders become GameCommands —
+ * this system does not mutate simulation state directly.
+ */
+export class SelectionSystem {
+  private selectionBoxStart: { x: number; y: number } | null = null;
+  private selectionBoxEnd: { x: number; y: number } | null = null;
+
+  public selectedEntities: Entity[] = [];
+  private squads: SquadSystem | null = null;
+  private commandSink: CommandSink | null = null;
+
+  public bindSquads(squads: SquadSystem) {
+    this.squads = squads;
+  }
+
+  public bindCommandSink(sink: CommandSink) {
+    this.commandSink = sink;
+  }
+
+  public update(input: InputManager, camera: Camera, entities: Entity[], fog: FogOfWar) {
+    const localId = MatchState.current?.localPlayerId;
+    if (!localId) return;
+
+    if (input.mouseLeftPressed) {
+      this.selectionBoxStart = { x: input.mousePos.x, y: input.mousePos.y };
+      this.selectionBoxEnd = { x: input.mousePos.x, y: input.mousePos.y };
+    }
+
+    if (input.mouseLeftDown && this.selectionBoxStart) {
+      this.selectionBoxEnd = { x: input.mousePos.x, y: input.mousePos.y };
+    }
+
+    if (!input.mouseLeftDown && this.selectionBoxStart && this.selectionBoxEnd) {
+      const isShift = input.keys['ShiftLeft'] || input.keys['ShiftRight'];
+      const micro = input.keys['ControlLeft'] || input.keys['ControlRight'];
+
+      const minX = Math.min(this.selectionBoxStart.x, this.selectionBoxEnd.x);
+      const maxX = Math.max(this.selectionBoxStart.x, this.selectionBoxEnd.x);
+      const minY = Math.min(this.selectionBoxStart.y, this.selectionBoxEnd.y);
+      const maxY = Math.max(this.selectionBoxStart.y, this.selectionBoxEnd.y);
+
+      const boxWidth = maxX - minX;
+      const boxHeight = maxY - minY;
+
+      if (!isShift) {
+        this.selectedEntities.forEach((e) => (e.selected = false));
+        this.selectedEntities = [];
+      }
+
+      if (boxWidth < 5 && boxHeight < 5) {
+        const worldPos = camera.screenToWorld(this.selectionBoxStart.x, this.selectionBoxStart.y);
+        for (const entity of entities) {
+          if (!isOwnedBy(entity, localId)) continue;
+          const dx = entity.x - worldPos.x;
+          const dy = entity.y - worldPos.y;
+          if (dx * dx + dy * dy <= entity.radius * entity.radius) {
+            entity.selected = true;
+            this.selectedEntities.push(entity);
+            break;
+          }
+        }
+      } else {
+        for (const entity of entities) {
+          if (!isOwnedBy(entity, localId)) continue;
+          const screenPos = camera.worldToScreen(entity.x, entity.y);
+          if (
+            screenPos.x >= minX &&
+            screenPos.x <= maxX &&
+            screenPos.y >= minY &&
+            screenPos.y <= maxY
+          ) {
+            if (!entity.selected) {
+              entity.selected = true;
+              this.selectedEntities.push(entity);
+            }
+          }
+        }
+      }
+
+      if (this.squads && !micro) {
+        this.selectedEntities = this.squads.expandSelectionToSquads(
+          this.selectedEntities,
+          entities,
+        );
+      }
+
+      this.selectionBoxStart = null;
+      this.selectionBoxEnd = null;
+    }
+
+    if (input.mouseRightPressed) {
+      const worldPos = camera.screenToWorld(input.mousePos.x, input.mousePos.y);
+
+      let clickedEnemy: Entity | null = null;
+      let clickedResource: ResourceNode | null = null;
+      let clickedBuilding: Building | null = null;
+
+      for (const entity of entities) {
+        if (entity.isDead || !fog.canTargetEntity(entity)) continue;
+        const dx = entity.x - worldPos.x;
+        const dy = entity.y - worldPos.y;
+        if (dx * dx + dy * dy > entity.radius * entity.radius * 4) continue;
+
+        if (entity instanceof ResourceNode) {
+          clickedResource = entity;
+          break;
+        }
+        if (entity.ownerPlayerId !== null && entity.ownerPlayerId !== localId) {
+          clickedEnemy = entity;
+          break;
+        }
+        if (
+          entity instanceof Building &&
+          isOwnedBy(entity, localId) &&
+          entity.isConstructed === false
+        ) {
+          clickedBuilding = entity;
+          break;
+        }
+      }
+
+      this.issueOrderCommands(localId, worldPos, clickedEnemy, clickedResource, clickedBuilding);
+    }
+  }
+
+  private issueOrderCommands(
+    playerId: string,
+    worldPos: { x: number; y: number },
+    clickedEnemy: Entity | null,
+    clickedResource: ResourceNode | null,
+    clickedBuilding: Building | null,
+  ) {
+    if (!this.commandSink) return;
+
+    const selectedSquads = this.squads?.squadsFromSelection(this.selectedEntities) ?? [];
+    const orderedSquadIds = new Set(selectedSquads.map((s) => s.id));
+
+    if (selectedSquads.length > 0 && !clickedBuilding && !clickedResource) {
+      for (const squad of selectedSquads) {
+        if (clickedEnemy) {
+          this.commandSink({
+            type: 'attack',
+            playerId,
+            squadId: squad.id,
+            targetEntityId: clickedEnemy.id,
+          });
+        } else {
+          this.commandSink({
+            type: 'moveSquad',
+            playerId,
+            squadId: squad.id,
+            x: worldPos.x,
+            y: worldPos.y,
+          });
+        }
+      }
+    }
+
+    const agentIds: number[] = [];
+    for (const entity of this.selectedEntities) {
+      if (!(entity instanceof Unit)) continue;
+      if (
+        entity.squadId &&
+        orderedSquadIds.has(entity.squadId) &&
+        !clickedBuilding &&
+        !clickedResource
+      ) {
+        continue;
+      }
+      agentIds.push(entity.id);
+    }
+
+    if (agentIds.length === 0) return;
+
+    if (clickedBuilding) {
+      this.commandSink({
+        type: 'assistBuild',
+        playerId,
+        unitIds: agentIds,
+        buildingId: clickedBuilding.id,
+      });
+    } else if (clickedResource) {
+      this.commandSink({
+        type: 'gather',
+        playerId,
+        unitIds: agentIds,
+        resourceEntityId: clickedResource.id,
+      });
+    } else if (clickedEnemy) {
+      this.commandSink({
+        type: 'attack',
+        playerId,
+        unitIds: agentIds,
+        targetEntityId: clickedEnemy.id,
+      });
+    } else {
+      const movers = agentIds.filter((id) => {
+        const e = this.selectedEntities.find((x) => x.id === id);
+        return (
+          e instanceof Unit &&
+          (!isCombatUnitType(e.unitType) || !e.squadId || !orderedSquadIds.has(e.squadId))
+        );
+      });
+      if (movers.length > 0) {
+        this.commandSink({
+          type: 'moveAgents',
+          playerId,
+          unitIds: movers,
+          x: worldPos.x,
+          y: worldPos.y,
+        });
+      }
+    }
+  }
+
+  public draw(ctx: CanvasRenderingContext2D) {
+    if (this.selectionBoxStart && this.selectionBoxEnd) {
+      const minX = Math.min(this.selectionBoxStart.x, this.selectionBoxEnd.x);
+      const maxX = Math.max(this.selectionBoxStart.x, this.selectionBoxEnd.x);
+      const minY = Math.min(this.selectionBoxStart.y, this.selectionBoxEnd.y);
+      const maxY = Math.max(this.selectionBoxStart.y, this.selectionBoxEnd.y);
+
+      const color = MatchState.current?.localPlayer.playerColor ?? '#4FC3F7';
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color + '33';
+      ctx.lineWidth = 1;
+
+      ctx.beginPath();
+      ctx.rect(minX, minY, maxX - minX, maxY - minY);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "package": "humans-vs-orcs-art-kit",
+  "version": "1.0.0-concept",
+  "projection": "2:1 isometric",
+  "light_direction": "upper-left",
+  "recommended_base_tile_px": [128, 64],
+  "background": "transparent RGBA for split assets",
+  "boards": [
+    "boards/00-master-style-frame.png",
+    "boards/01-terrain-atlas.png",
+    "boards/02-humans-sheet.png",
+    "boards/03-orcs-sheet.png",
+    "boards/04-ui-vfx-sheet.png",
+    "boards/05-asset-overview.png"
+  ],
+  "assets": {
+    "terrain": ["grass", "dirt", "path-straight", "path-corner", "path-t-junction", "path-cross", "rocks", "tree-deciduous", "tree-pine", "stump", "gold-deposit", "water", "shore-straight", "shore-inner-corner", "shore-outer-corner", "bush", "flowers", "pebbles", "blue-flowers", "battlefield-skull"],
+    "humans_buildings": ["town-hall", "barracks", "farm", "watchtower"],
+    "humans_units": ["worker", "swordsman", "archer", "mage"],
+    "orcs_buildings": ["stronghold", "barracks", "war-hut", "spike-tower"],
+    "orcs_units": ["grunt", "spear-orc", "shaman", "peon"],
+    "ui": ["food", "lumber", "gold", "population", "attack", "armor", "speed", "build", "gather", "select", "enemy-alert", "crossed-swords"],
+    "vfx": ["hit-spark", "impact-flash", "dust-puff", "healing-burst", "magic-burst", "damage-slash", "arrow-projectile", "death-wisp"]
+  },
+  "animation_states": ["idle", "walk", "attack", "hit", "death", "gather", "build"],
+  "integration_note": "Concept/prototype assets: align pivots and footprints, normalize target sizes, and test readability before final production use."
+}

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Humans vs Orcs RTS</title>
+    <link rel="stylesheet" href="/src/style.css">
+  </head>
+  <body>
+    <div id="loading">Loading art kit…</div>
+    <div id="lobby" hidden></div>
+    <canvas id="game-canvas"></canvas>
+    <div id="top-bar">
+      <span id="seed-label">Seed: …</span>
+      <span id="pvp-mode-label" hidden></span>
+      <button id="new-map-btn" type="button">New World</button>
+      <button id="territory-btn" type="button" title="Toggle territory overlay (T)">Territory</button>
+      <button id="save-btn" type="button" title="Save game (snapshot + replay log)">Save</button>
+      <button id="load-btn" type="button" title="Load last save">Load</button>
+      <button id="export-replay-btn" type="button" title="Download seed + command log">Replay</button>
+      <button id="surrender-btn" type="button" hidden title="Concede the match">Surrender</button>
+    </div>
+    <aside id="event-feed" aria-label="World event feed">
+      <div class="event-feed-header">World History</div>
+      <div id="event-feed-list"></div>
+    </aside>
+    <div id="ui-container">
+      <div id="selection-info"></div>
+      <div id="action-buttons"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
