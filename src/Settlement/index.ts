@@ -22,6 +22,16 @@ export {
   type SettlementLayoutProfile,
 } from './LayoutVariants';
 export type {
+  SettlementFocus,
+  SettlementSpecialization,
+} from './SettlementFocus';
+export {
+  SETTLEMENT_FOCUSES,
+  settlementFocusLabel,
+  specializationLabel,
+  focusNeedBias,
+} from './SettlementFocus';
+export type {
   SettlementCapacity,
   SettlementNeedKind,
   SettlementNeeds,
@@ -48,5 +58,9 @@ export {
   SETTLER_WORKERS,
   SETTLER_GOLD_COST,
   SETTLER_MIN_PARENT_POP,
+  SETTLER_CARAVAN_SPEED,
   type SettlerGroup,
 } from './SettlerGroup';
+export { civilianVisualAgents, CivilianVisualAgents } from './CivilianVisualAgents';
+export type { SettlementIncomeSources } from './Settlement';
+export { emptyIncomeSources } from './Settlement';

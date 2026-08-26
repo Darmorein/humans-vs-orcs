@@ -72,8 +72,8 @@ export function analyzeStrategicSituation(ctx: AnalyzeContext): StrategicSituati
     if (e.ownerPlayerId === ctx.playerId) {
       if (e instanceof Unit) {
         unitPop += 1;
-        if (e.unitType === faction.workerType) workerCount += 1;
-        else if (e.unitType === faction.meleeType || e.unitType === faction.rangedType) {
+        // Workers retired — civic builders / civic pop proxy for AI economy scores.
+        if (e.unitType === faction.meleeType || e.unitType === faction.rangedType) {
           armyCount += 1;
           armyStrength += unitCombatWeight(e);
         }
@@ -95,6 +95,12 @@ export function analyzeStrategicSituation(ctx: AnalyzeContext): StrategicSituati
         }
       }
     }
+  }
+
+  // Civic labor proxy (retired Worker micro) — builders + population soft floor.
+  if (settlement) {
+    const builders = settlement.citizens.filter((c) => c.profession === 'builder').length;
+    workerCount = Math.max(builders, Math.floor(settlement.population * 0.2));
   }
 
   if (main) {
@@ -180,7 +186,7 @@ export function analyzeStrategicSituation(ctx: AnalyzeContext): StrategicSituati
     : 0.5;
 
   const canExpand =
-    settlements.canFormSettlerGroup(ctx.playerId, player.factionId) ||
+    settlements.canFormSettlerGroup(ctx.playerId, player.factionId, ctx.match) ||
     !!settlements.getSettlerGroup(ctx.playerId);
 
   const expansionCrowding =

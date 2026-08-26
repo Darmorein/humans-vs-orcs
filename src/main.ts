@@ -28,13 +28,38 @@ async function bootGame(target: BootTarget) {
     const seedFromUrl = seedParam ? Number(seedParam) : undefined;
     const seed =
       target.seed ?? (Number.isFinite(seedFromUrl) ? seedFromUrl : undefined);
+    const bothAi =
+      params.get('aiVai') === '1' ||
+      params.get('aivsai') === '1' ||
+      params.get('aiDetTest') === '1';
     game = new Game({
       seed,
       localFaction: target.localFaction,
+      bothAi,
     });
   }
 
+  // Determinism harnesses run before the frame loop so wall-clock frames don't pollute ticks.
+  if (params.get('aiDetTest') === '1') {
+    const ticks = Number(params.get('ticks') ?? 600);
+    const result = game.runAiVsAiDeterminismTest(Number.isFinite(ticks) ? ticks : 600);
+    console.info('[AiVsAiDeterminismTest]', result.ok ? 'PASS' : 'FAIL', result);
+  }
+  if (params.get('detTest') === '1' && params.get('aiDetTest') !== '1') {
+    const n = Number(params.get('n') ?? 90);
+    const m = Number(params.get('m') ?? 90);
+    const result = game.runSaveLoadDeterminismTest(
+      Number.isFinite(n) ? n : 90,
+      Number.isFinite(m) ? m : 90,
+    );
+    console.info('[DeterminismTest]', result.ok ? 'PASS' : 'FAIL', result);
+  }
+
   game.start();
+
+  if (params.get('debug') === '1' || params.get('detTest') === '1' || params.get('aiDetTest') === '1') {
+    (window as unknown as { __game?: Game }).__game = game;
+  }
 
   if (target.kind === 'skirmish') {
     const wantLoad = params.get('load') === '1';
@@ -58,7 +83,9 @@ async function bootGame(target: BootTarget) {
   }
 
   const seedLabel = document.getElementById('seed-label');
-  if (seedLabel) seedLabel.textContent = `Seed: ${game.seed}`;
+  if (seedLabel) {
+    seedLabel.textContent = `Seed: ${game.seed}${params.get('aiVai') === '1' ? ' (AI vs AI)' : ''}`;
+  }
 
   if (!game.worldValidation.ok) {
     console.warn('[WorldGen] map validation incomplete', game.worldValidation);
@@ -80,6 +107,16 @@ async function boot() {
     console.error(err);
   }
   if (loading) loading.remove();
+
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('aiVai') === '1' || params.get('skirmish') === '1' || params.get('aiDetTest') === '1' || params.get('detTest') === '1') {
+    void bootGame({
+      kind: 'skirmish',
+      localFaction: params.get('faction') === 'orcs' ? 'orcs' : 'humans',
+      seed: params.get('seed') ? Number(params.get('seed')) : undefined,
+    });
+    return;
+  }
 
   mountLobby((target) => {
     void bootGame(target);

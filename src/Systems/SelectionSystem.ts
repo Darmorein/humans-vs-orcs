@@ -14,8 +14,9 @@ import type { GameCommand } from '../Sim/Commands';
 export type CommandSink = (cmd: GameCommand) => void;
 
 /**
- * Local selection & order *intent*. Combat/worker orders become GameCommands —
+ * Local selection & order *intent*. Combat orders become GameCommands —
  * this system does not mutate simulation state directly.
+ * Economy workers / settler escorts are not army-selectable.
  */
 export class SelectionSystem {
   private selectionBoxStart: { x: number; y: number } | null = null;
@@ -31,6 +32,15 @@ export class SelectionSystem {
 
   public bindCommandSink(sink: CommandSink) {
     this.commandSink = sink;
+  }
+
+  private isSelectableUnit(entity: Entity, localId: string): boolean {
+    if (entity instanceof ResourceNode) return true;
+    if (!isOwnedBy(entity, localId)) return false;
+    if (!(entity instanceof Unit)) return true;
+    if (entity.unitType === 'Worker' || entity.unitType === 'Peon') return false;
+    if (entity.settlerGroupId) return false;
+    return true;
   }
 
   public update(input: InputManager, camera: Camera, entities: Entity[], fog: FogOfWar) {
@@ -66,7 +76,7 @@ export class SelectionSystem {
       if (boxWidth < 5 && boxHeight < 5) {
         const worldPos = camera.screenToWorld(this.selectionBoxStart.x, this.selectionBoxStart.y);
         for (const entity of entities) {
-          if (!isOwnedBy(entity, localId)) continue;
+          if (!this.isSelectableUnit(entity, localId)) continue;
           const dx = entity.x - worldPos.x;
           const dy = entity.y - worldPos.y;
           if (dx * dx + dy * dy <= entity.selectionRadius * entity.selectionRadius) {
@@ -77,7 +87,7 @@ export class SelectionSystem {
         }
       } else {
         for (const entity of entities) {
-          if (!isOwnedBy(entity, localId)) continue;
+          if (!this.isSelectableUnit(entity, localId)) continue;
           const screenPos = camera.worldToScreen(entity.x, entity.y);
           if (
             screenPos.x >= minX &&
@@ -151,7 +161,7 @@ export class SelectionSystem {
     const selectedSquads = this.squads?.squadsFromSelection(this.selectedEntities) ?? [];
     const orderedSquadIds = new Set(selectedSquads.map((s) => s.id));
 
-    if (selectedSquads.length > 0 && !clickedBuilding && !clickedResource) {
+    if (selectedSquads.length > 0 && !clickedBuilding) {
       for (const squad of selectedSquads) {
         if (clickedEnemy) {
           this.commandSink({
@@ -160,7 +170,7 @@ export class SelectionSystem {
             squadId: squad.id,
             targetEntityId: clickedEnemy.id,
           });
-        } else {
+        } else if (!clickedResource) {
           this.commandSink({
             type: 'moveSquad',
             playerId,
@@ -175,6 +185,7 @@ export class SelectionSystem {
     const agentIds: number[] = [];
     for (const entity of this.selectedEntities) {
       if (!(entity instanceof Unit)) continue;
+      if (entity.unitType === 'Worker' || entity.unitType === 'Peon') continue;
       if (
         entity.squadId &&
         orderedSquadIds.has(entity.squadId) &&
@@ -188,21 +199,10 @@ export class SelectionSystem {
 
     if (agentIds.length === 0) return;
 
-    if (clickedBuilding) {
-      this.commandSink({
-        type: 'assistBuild',
-        playerId,
-        unitIds: agentIds,
-        buildingId: clickedBuilding.id,
-      });
-    } else if (clickedResource) {
-      this.commandSink({
-        type: 'gather',
-        playerId,
-        unitIds: agentIds,
-        resourceEntityId: clickedResource.id,
-      });
-    } else if (clickedEnemy) {
+    // Economy gather / assistBuild retired — combat / move only.
+    if (clickedBuilding || clickedResource) return;
+
+    if (clickedEnemy) {
       this.commandSink({
         type: 'attack',
         playerId,

@@ -1,40 +1,61 @@
 import { Entity } from '../Entities/Entity';
 import { Unit } from '../Entities/Unit';
 import { Building, isMainBuilding } from '../Entities/Building';
+import { ResourceNode } from '../Entities/ResourceNode';
 import { MatchState } from '../Players/MatchState';
 import { isOwnedBy } from '../Players/Relations';
 import { FACTIONS } from '../Players/Types';
 import type { BuildingType } from '../Entities/Building';
 import {
   getRecipe,
-  strategicOptionsForFaction,
+  listStrategicBuildOptions,
+  treasuryGoldCost,
   type ConstructionTarget,
 } from '../Settlement/ConstructionCatalog';
+import { OUTPOST_TREASURY_COST } from '../Settlement/SettlementSystem';
 import { populationSim, professionLabel } from '../Settlement/Population';
 import { TIER_DEFS } from '../Settlement/SettlementTier';
+import {
+  SETTLEMENT_FOCUSES,
+  settlementFocusLabel,
+  specializationLabel,
+  type SettlementFocus,
+} from '../Settlement/SettlementFocus';
 import { doctrineOf } from '../Players/FactionDoctrine';
+import {
+  TAX_POLICIES,
+  TAX_POLICY_DEFS,
+  TAX_POLICY_COOLDOWN_TICKS,
+  type TaxPolicy,
+} from '../Players/TaxPolicy';
 import { isCombatUnitType } from '../Combat/Squad';
 import { ALL_FORMATIONS, formationLabel } from '../Combat/FormationDefs';
 import { heroTypeLabel } from '../Heroes';
 import { artifactQualityLabel, artifactTypeLabel } from '../Artifacts';
+import { getUnitDef } from '../Sim/UnitCatalog';
 import { Game } from '../Game';
 
 export class UIManager {
   private selectionInfoDiv: HTMLElement;
   private actionButtonsDiv: HTMLElement;
+  private citiesOverviewDiv: HTMLElement | null;
   private game: Game;
 
   private lastSelectedEntityId: number | null = null;
   private lastGold: number = -1;
   private lastQueueSig = '';
+  private lastCitiesSig = '';
 
   constructor(game: Game) {
     this.game = game;
     this.selectionInfoDiv = document.getElementById('selection-info')!;
     this.actionButtonsDiv = document.getElementById('action-buttons')!;
+    this.citiesOverviewDiv = document.getElementById('cities-overview');
   }
 
   public update(selectedEntities: Entity[]) {
+    this.renderCitiesOverview();
+
     if (selectedEntities.length === 0) {
       if (this.lastSelectedEntityId !== null) {
         this.selectionInfoDiv.innerHTML = '';
@@ -61,7 +82,7 @@ export class UIManager {
           .list()
           .map((p) => `${p.id}:${p.status}`)
           .join('|') +
-        `|c${settlement.population}|t${settlement.tier}|g${groupReady ? 1 : 0}|sq${squads.map((s) => `${s.id}:${s.size}`).join(',')}|h${this.game.getHeroSystem().heroesForPlayer(local?.id ?? '').map((h) => h.id).join(',')}|a${this.game.getArtifactSystem().forPlayer(local?.id ?? '').map((x) => `${x.id}:${x.boundUnitId ?? 'v'}`).join(',')}`
+        `|c${settlement.population}|t${settlement.tier}|f${settlement.focus}|sp${settlement.specialization}|w${settlement.warShock.toFixed(2)}|ig${settlement.localIncomeRate.toFixed(1)}|tx${settlement.taxContributionRate.toFixed(1)}|tp${local?.taxPolicy}|tr${(local?.treasuryIncomeRate ?? 0).toFixed(1)}|g${groupReady ? 1 : 0}|sq${squads.map((s) => `${s.id}:${s.size}`).join(',')}|h${this.game.getHeroSystem().heroesForPlayer(local?.id ?? '').map((h) => h.id).join(',')}|a${this.game.getArtifactSystem().forPlayer(local?.id ?? '').map((x) => `${x.id}:${x.boundUnitId ?? 'v'}`).join(',')}`
       : `sq${squads.map((s) => `${s.id}:${s.size}`).join(',')}`;
 
     if (
@@ -101,6 +122,16 @@ export class UIManager {
       infoHtml += `<h3>${this.getEntityName(entity)}</h3>`;
       infoHtml += `<p>HP: ${Math.ceil(entity.hp)} / ${entity.maxHp}</p>`;
 
+      if (entity instanceof ResourceNode) {
+        infoHtml += `<p>Gold deposit · remaining ${Math.floor(entity.remainingAmount)}</p>`;
+        infoHtml += `<p>Controlled by: ${entity.controllingFactionId ?? 'none'}</p>`;
+        infoHtml += `<p>Linked: ${entity.linkedSettlementId ?? '—'} · infra ${entity.infrastructureLevel.toFixed(1)}</p>`;
+        infoHtml += `<p>Output ~${entity.lastExtractionRate.toFixed(1)}/s · safety ${Math.round(entity.safety * 100)}%</p>`;
+        if (entity.raidDamageCooldown > 0) {
+          infoHtml += `<p class="muted">Raid damage ${entity.raidDamageCooldown.toFixed(1)}s</p>`;
+        }
+      }
+
       if (local && entity instanceof Unit && isOwnedBy(entity, local.id)) {
         infoHtml += this.heroInfoHtml(entity);
         infoHtml += this.artifactInfoHtml(entity);
@@ -111,8 +142,7 @@ export class UIManager {
           }
         }
         if (entity.unitType === 'Worker' || entity.unitType === 'Peon') {
-          infoHtml += `<p>Gold: ${entity.heldGold} / 10</p>`;
-          infoHtml += `<p class="muted">Autonomous builds: House / Farm / Storage / Roads</p>`;
+          infoHtml += `<p class="muted">Legacy civilian (not commandable)</p>`;
         } else if (!entity.heroId) {
           infoHtml += `<p>Damage: ${entity.damage}</p>`;
         }
@@ -120,17 +150,34 @@ export class UIManager {
     }
 
     if (settlement && local && isOwnedBy(entity, local.id)) {
-      infoHtml += `<p>Mats: W${Math.floor(settlement.wood)} S${Math.floor(settlement.stone)} I${Math.floor(settlement.iron)}</p>`;
+      infoHtml += `<p>Local: G${Math.floor(settlement.gold)} F${Math.floor(settlement.food)} W${Math.floor(settlement.wood)} S${Math.floor(settlement.stone)} I${Math.floor(settlement.iron)}</p>`;
       if (entity instanceof Building && isMainBuilding(entity.buildingType)) {
         const by = populationSim.countByProfession(settlement);
+        const mil = by.soldier;
+        const labor = Math.round(settlement.civicLabor * 10) / 10;
+        const localPlayer = MatchState.current?.localPlayer;
+        const isCapital = localPlayer?.capitalSettlementId === settlement.id;
+        const tierBit = `${TIER_DEFS[settlement.tier].label}${isCapital ? ' · Capital' : ''}`;
+        infoHtml += `<p>${tierBit} · Pop ${settlement.population}/${settlement.housing} · Labor ${labor} · Mil ${mil}</p>`;
+        infoHtml += `<p>Local income +${settlement.localIncomeRate.toFixed(1)}G/s · Tax contrib +${settlement.taxContributionRate.toFixed(1)}/s</p>`;
+        infoHtml += `<p class="muted">Mines ${settlement.incomeSources.goldMines.toFixed(1)} · Farms ${settlement.incomeSources.foodFarms.toFixed(1)}</p>`;
+        infoHtml += `<p>Infra mines ${settlement.mineCount} · farms ${settlement.farmCount} · outposts ${settlement.outpostCount}</p>`;
+        infoHtml += `<p>Safety ${Math.round(settlement.safety * 100)}% · Influence ${Math.round(settlement.influence * 100)}% · Focus ${settlementFocusLabel(settlement.focus)} · ${specializationLabel(settlement.specialization)}</p>`;
+        infoHtml += `<p class="muted">Attract ${Math.round(settlement.migrationAttraction * 100)}% · Jobs ${Math.round(settlement.jobs * 100)}%</p>`;
+        const growth = settlement.growthHints.slice(0, 3);
+        const safetyH = settlement.safetyHints.slice(0, 3);
+        if (growth.length) {
+          infoHtml += `<p class="muted">Growth: ${growth.join('; ')}</p>`;
+        }
+        if (safetyH.length) {
+          infoHtml += `<p class="muted">Safety: ${safetyH.join('; ')}</p>`;
+        }
         const top = (Object.entries(by) as [keyof typeof by, number][])
           .filter(([, n]) => n > 0)
           .sort((a, b) => b[1] - a[1])
           .slice(0, 4)
           .map(([role, n]) => `${professionLabel(local.factionId, role)} ${n}`)
           .join(', ');
-        infoHtml += `<p>${TIER_DEFS[settlement.tier].label} · Citizens ${settlement.population}/${settlement.housing}</p>`;
-        infoHtml += `<p class="muted">Attract ${Math.round(settlement.migrationAttraction * 100)}% · Jobs ${Math.round(settlement.jobs * 100)}%</p>`;
         if (top) infoHtml += `<p class="muted">${top}</p>`;
         const heroes = this.game.getHeroSystem().heroesForPlayer(local.id);
         if (heroes.length > 0) {
@@ -155,6 +202,7 @@ export class UIManager {
   }
 
   private getEntityName(entity: Entity): string {
+    if (entity instanceof ResourceNode) return 'Gold Deposit';
     if (entity instanceof Building) {
       if (entity.buildingType === 'PigFarm') return 'War Hut';
       if (entity.buildingType === 'OrcBarracks') return 'Orc Barracks';
@@ -237,33 +285,109 @@ export class UIManager {
     if (entity instanceof Building && isMainBuilding(entity.buildingType)) {
       if (!entity.isConstructed) return;
 
-      this.createButton(`Train ${faction.workerType} (50G)`, gold >= 50, () =>
-        this.game.trainUnit(entity, faction.workerType, 50),
+      const stock = {
+        gold: gold, // Faction Treasury for strategic afford checks
+        wood: settlement?.wood ?? 0,
+        stone: settlement?.stone ?? 0,
+        iron: settlement?.iron ?? 0,
+        population: settlement?.population ?? 0,
+        tier: settlement?.tier,
+      };
+
+      for (const opt of listStrategicBuildOptions(local.factionId, stock)) {
+        const r = opt.recipe;
+        if (r.target === 'Outpost') continue; // dedicated Establish Outpost flow
+        const costBit = `${Math.ceil(treasuryGoldCost(r.costs))}T`;
+        const label = opt.blockReason
+          ? `${r.label} — ${opt.blockReason}`
+          : `Queue ${r.label} (${costBit})`;
+        this.createButton(label, true, () => {
+          if (opt.blockReason) {
+            this.game.showBuildFeedback(`Cannot build ${r.label}: ${opt.blockReason}`);
+            return;
+          }
+          this.game.startBuildingPlacement(r.target as BuildingType);
+        });
+      }
+
+      const outpostOpt = listStrategicBuildOptions(local.factionId, stock).find(
+        (o) => o.recipe.target === 'Outpost',
+      );
+      const outpostLock = outpostOpt?.blockReason ?? null;
+      const outpostCost = Math.ceil(OUTPOST_TREASURY_COST);
+      this.createButton(
+        outpostLock
+          ? `Outpost — ${outpostLock}`
+          : `Establish Outpost (${outpostCost} Treasury)`,
+        true,
+        () => {
+          if (outpostLock) {
+            this.game.showBuildFeedback(`Cannot establish Outpost: ${outpostLock}`);
+            return;
+          }
+          this.game.startEstablishOutpostPlacement();
+        },
       );
 
-      for (const recipe of strategicOptionsForFaction(local.factionId, settlement?.tier)) {
-        const afford =
-          settlement?.canAfford(recipe.costs) ||
-          (gold >= recipe.costs.gold &&
-            (settlement?.wood ?? 0) >= recipe.costs.wood &&
-            (settlement?.stone ?? 0) >= recipe.costs.stone);
+      // Tax policy buttons
+      const onCooldown =
+        local.lastTaxChangeTick > 0 &&
+        this.game.getSimTick() - local.lastTaxChangeTick < TAX_POLICY_COOLDOWN_TICKS;
+      for (const p of TAX_POLICIES) {
+        const def = TAX_POLICY_DEFS[p];
+        const active = local.taxPolicy === p;
         this.createButton(
-          `Queue ${recipe.label}`,
-          !!afford,
-          () => this.game.startBuildingPlacement(recipe.target as BuildingType),
+          `Tax: ${def.label}${active ? ' ✓' : ''}${onCooldown && !active ? ' (cd)' : ''}`,
+          true,
+          () => {
+            if (onCooldown && !active) {
+              this.game.showBuildFeedback('Tax policy on cooldown');
+              return;
+            }
+            this.game.setTaxPolicy(p as TaxPolicy);
+            if (p === 'war') {
+              this.game.showBuildFeedback(
+                'WAR tax: max treasury take — strong local growth penalties',
+              );
+            }
+          },
         );
+      }
+
+      if (settlement) {
+        const focusSelect = document.createElement('select');
+        focusSelect.className = 'focus-select';
+        focusSelect.title = 'City focus';
+        for (const f of SETTLEMENT_FOCUSES) {
+          const opt = document.createElement('option');
+          opt.value = f;
+          opt.textContent = `Focus: ${settlementFocusLabel(f)}`;
+          if (settlement.focus === f) opt.selected = true;
+          focusSelect.appendChild(opt);
+        }
+        focusSelect.addEventListener('change', () => {
+          this.game.setSettlementFocus(
+            settlement.id,
+            focusSelect.value as SettlementFocus,
+          );
+        });
+        this.actionButtonsDiv.appendChild(focusSelect);
       }
 
       const canForm = this.game.canFormSettlerGroup();
       const ready = this.game.hasReadySettlerGroup();
       const doc = doctrineOf(local.factionId);
       this.createButton(
-        ready
-          ? 'Found Settlement Here'
-          : `Form Settler Group (${doc.settlerGoldCost}G/${doc.settlerWoodCost}W)`,
-        ready || canForm,
+        ready ? 'Found City Here' : `Found City Here (${doc.settlerGoldCost}T)`,
+        true,
         () => {
-          // Placement is local UI; founding mutates via FoundSettlementCommand.
+          if (!ready && !canForm) {
+            const why =
+              this.game.formSettlerGroupBlockReason() ??
+              `Settlers need Town+, ${doc.settlerMinPop}+ citizens, and caravan costs`;
+            this.game.showBuildFeedback(why);
+            return;
+          }
           if (!ready && canForm) {
             this.game.formSettlerGroup();
           }
@@ -273,19 +397,110 @@ export class UIManager {
       if (!ready && !canForm && settlement) {
         const hint = document.createElement('div');
         hint.className = 'queue-hint';
-        hint.textContent = `Settlers need Village+, ${doc.settlerMinPop}+ citizens, idle workers (${local.faction.displayName})`;
+        const why = this.game.formSettlerGroupBlockReason();
+        hint.textContent =
+          why ??
+          `Settlers need Town+, ${doc.settlerMinPop}+ citizens (${local.faction.displayName})`;
         this.actionButtonsDiv.appendChild(hint);
       }
 
       this.renderQueueControls(settlement);
     } else if (entity instanceof Building && entity.buildingType === faction.productionBuilding) {
       if (!entity.isConstructed) return;
-      this.createButton(`Train ${faction.meleeType} (80G)`, gold >= 80, () =>
-        this.game.trainUnit(entity, faction.meleeType, 80),
+      const meleeDef = getUnitDef(faction.meleeType);
+      const rangedDef = getUnitDef(faction.rangedType);
+      const meleeCost = meleeDef?.goldCost ?? 80;
+      const rangedCost = rangedDef?.goldCost ?? 100;
+      const meleePop = meleeDef?.populationCost ?? 1;
+      const rangedPop = rangedDef?.populationCost ?? 1;
+      const cit = settlement?.population ?? 0;
+      this.createButton(
+        gold >= meleeCost && cit >= meleePop
+          ? `Train ${faction.meleeType} (${meleeCost}G + ${meleePop} cit)`
+          : `Train ${faction.meleeType} — ${[
+              gold < meleeCost ? `Need ${meleeCost - Math.floor(gold)}G` : null,
+              cit < meleePop ? `Need ${meleePop - cit} cit` : null,
+            ]
+              .filter(Boolean)
+              .join(', ')}`,
+        true,
+        () => {
+          if (gold < meleeCost || cit < meleePop) {
+            this.game.showBuildFeedback(
+              `Cannot train ${faction.meleeType}: ${[
+                gold < meleeCost ? `Need ${meleeCost - Math.floor(gold)}G` : null,
+                cit < meleePop ? `Need ${meleePop - cit} citizens` : null,
+              ]
+                .filter(Boolean)
+                .join(', ')}`,
+            );
+            return;
+          }
+          this.game.trainUnit(entity, faction.meleeType);
+        },
       );
-      this.createButton(`Train ${faction.rangedType} (100G)`, gold >= 100, () =>
-        this.game.trainUnit(entity, faction.rangedType, 100),
+      this.createButton(
+        gold >= rangedCost && cit >= rangedPop
+          ? `Train ${faction.rangedType} (${rangedCost}G + ${rangedPop} cit)`
+          : `Train ${faction.rangedType} — ${[
+              gold < rangedCost ? `Need ${rangedCost - Math.floor(gold)}G` : null,
+              cit < rangedPop ? `Need ${rangedPop - cit} cit` : null,
+            ]
+              .filter(Boolean)
+              .join(', ')}`,
+        true,
+        () => {
+          if (gold < rangedCost || cit < rangedPop) {
+            this.game.showBuildFeedback(
+              `Cannot train ${faction.rangedType}: ${[
+                gold < rangedCost ? `Need ${rangedCost - Math.floor(gold)}G` : null,
+                cit < rangedPop ? `Need ${rangedPop - cit} citizens` : null,
+              ]
+                .filter(Boolean)
+                .join(', ')}`,
+            );
+            return;
+          }
+          this.game.trainUnit(entity, faction.rangedType);
+        },
       );
+    }
+  }
+
+  private renderCitiesOverview() {
+    const el = this.citiesOverviewDiv;
+    if (!el) return;
+    const rows = this.game.getOwnedCitiesOverview();
+    const sig = rows
+      .map(
+        (r) =>
+          `${r.id}:${r.tier}:${r.focus}:${r.pop}:${r.underPressure ? 1 : 0}:${r.isCapital ? 1 : 0}`,
+      )
+      .join('|');
+    if (sig === this.lastCitiesSig) return;
+    this.lastCitiesSig = sig;
+    el.innerHTML = '';
+    const title = document.createElement('div');
+    title.className = 'cities-title';
+    title.textContent = 'Cities';
+    el.appendChild(title);
+    if (rows.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'muted';
+      empty.textContent = 'None';
+      el.appendChild(empty);
+      return;
+    }
+    for (const r of rows) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'city-row';
+      const cap = r.isCapital ? ' · Capital' : '';
+      const press = r.underPressure ? ' ⚠' : '';
+      btn.innerHTML = `<span class="${r.isCapital ? 'city-cap' : ''}">${r.tier}${cap}</span> · ${settlementFocusLabel(r.focus as SettlementFocus)} · ${r.pop}${press}`;
+      if (r.underPressure) btn.classList.add('city-pressure');
+      btn.addEventListener('click', () => this.game.centerOnSettlement(r.id));
+      el.appendChild(btn);
     }
   }
 

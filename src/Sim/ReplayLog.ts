@@ -39,11 +39,12 @@ export interface DeterminismMeta {
 export const CURRENT_DETERMINISM: DeterminismMeta = {
   level: 'partial',
   notes: [
-    'Load uses full GameStateSnapshot (authoritative resume).',
-    'Replay log (seed + TimedCommand[]) is recorded for future lockstep.',
-    'AI still issues world mutations outside the command queue.',
-    'Some systems still use Math.random (artifacts, AI jitter, history).',
-    'Civic population / heroes / artifacts are only partially in snapshots.',
+    'Load uses GameStateSnapshot v3 (entities+unit runtime, soft timers, AI phase, squads, heroes, artifacts, queues, RNG, id allocators).',
+    'Replay log recorded; ReplayPlayer injects commands when beginDevReplay is active.',
+    'AI issues GameCommands through the same applyCommand path as local/remote.',
+    'Match seed pick / New World / PvP fair-seed search may use Math.random (outside sim ticks).',
+    'State hash quantizes floats to 0.25 to absorb residual path/collision micro-drift.',
+    'WorldHistory battle/migration cluster buffers are cleared on load (events + elapsed restored).',
   ],
 };
 

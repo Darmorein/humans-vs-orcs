@@ -3,6 +3,26 @@ import { pickLayoutForId, type SettlementLayoutProfile } from './LayoutVariants'
 import { ConstructionQueue } from './ConstructionQueue';
 import type { Citizen } from './Population/Types';
 import { TIER_DEFS, type SettlementTier } from './SettlementTier';
+import type { SettlementFocus, SettlementSpecialization } from './SettlementFocus';
+
+/** Named income channels for settlement dashboard / AI. */
+export interface SettlementIncomeSources {
+  goldMines: number;
+  goldPassive: number;
+  foodFarms: number;
+  woodPassive: number;
+  stonePassive: number;
+}
+
+export function emptyIncomeSources(): SettlementIncomeSources {
+  return {
+    goldMines: 0,
+    goldPassive: 0,
+    foodFarms: 0,
+    woodPassive: 0,
+    stonePassive: 0,
+  };
+}
 
 /**
  * Autonomous settlement seat owned by one Player (a player may own several).
@@ -51,6 +71,16 @@ export class Settlement {
   /** Civic prestige — also feeds InfluenceMap territory strength. */
   public influence = 0.3;
 
+  /** Player strategic focus — soft autonomous bias. */
+  public focus: SettlementFocus = 'balanced';
+  /** Emergent role from buildings / economy (world-driven). */
+  public specialization: SettlementSpecialization = 'none';
+  /** Short reasons for UI (growth / safety), refreshed each tick. */
+  public growthHints: string[] = [];
+  public safetyHints: string[] = [];
+  /** Decaying war shock from nearby casualties (0..1). */
+  public warShock = 0;
+
   public capacity: SettlementCapacity = {
     food: 80,
     wood: 160,
@@ -70,7 +100,20 @@ export class Settlement {
   public houseCount = 0;
   public farmCount = 0;
   public storageCount = 0;
+  public outpostCount = 0;
+  public mineCount = 0;
   public hasTownCenter = false;
+
+  /** Aggregate civic builders available for autonomous/strategic construction. */
+  public civicLabor = 0;
+  /** Per-tick resource income breakdown for UI (gold/food/wood/stone). */
+  public incomeSources: SettlementIncomeSources = emptyIncomeSources();
+  /** Last-tick rates (per second) for dashboard — local production (not tax). */
+  public incomeRates = { gold: 0, food: 0, wood: 0, stone: 0 };
+  /** Local gold income rate (mines), for settlement panel. */
+  public localIncomeRate = 0;
+  /** Gold remitted to Faction Treasury last tax tick (/s). */
+  public taxContributionRate = 0;
 
   public buildCooldown = 0;
   public placementSalt = 0;

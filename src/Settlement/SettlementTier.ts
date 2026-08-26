@@ -36,6 +36,7 @@ const VILLAGE_BUILDINGS: ConstructionTarget[] = [
   'Barracks',
   'OrcBarracks',
   'Wall',
+  'Outpost',
 ];
 const TOWN_BUILDINGS: ConstructionTarget[] = [
   ...VILLAGE_BUILDINGS,
@@ -79,14 +80,15 @@ export const TIER_DEFS: Record<SettlementTier, SettlementTierDef> = {
     housingBonus: 4,
     capacityMult: 1,
     migrationBonus: 0.05,
-    canSendSettlers: true,
+    /** Second city delayed — settlers require Town+. Outpost remains at Village. */
+    canSendSettlers: false,
     allowedBuildings: VILLAGE_BUILDINGS,
   },
   town: {
     id: 'town',
     label: 'Town',
-    minPopulation: 22,
-    minStructures: 5,
+    minPopulation: 20,
+    minStructures: 4,
     housingBonus: 8,
     capacityMult: 1.15,
     migrationBonus: 0.1,
@@ -122,6 +124,14 @@ export function nextTier(tier: SettlementTier): SettlementTier | null {
 
 export function isBuildingAllowed(tier: SettlementTier, target: ConstructionTarget): boolean {
   return TIER_DEFS[tier].allowedBuildings.includes(target);
+}
+
+/** Lowest tier that unlocks this building, or null if never. */
+export function minTierForBuilding(target: ConstructionTarget): SettlementTier | null {
+  for (const tier of TIER_ORDER) {
+    if (TIER_DEFS[tier].allowedBuildings.includes(target)) return tier;
+  }
+  return null;
 }
 
 /** Promote if population + structures meet the next tier's thresholds. */

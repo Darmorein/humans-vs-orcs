@@ -260,6 +260,57 @@ body, html {
   color: #ffe0b2;
 }
 
+#cities-overview {
+  position: absolute;
+  top: 58px;
+  left: 10px;
+  z-index: 4;
+  min-width: 148px;
+  max-width: 220px;
+  pointer-events: auto;
+  background: rgba(18, 24, 16, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  padding: 6px 8px;
+  color: #d7cfb7;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+#cities-overview .cities-title {
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  margin-bottom: 4px;
+  color: #e8e0c8;
+}
+
+#cities-overview button.city-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: inherit;
+  padding: 3px 2px;
+  cursor: pointer;
+  font: inherit;
+  border-radius: 2px;
+}
+
+#cities-overview button.city-row:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+#cities-overview .city-cap {
+  color: #ffe082;
+  font-weight: 600;
+}
+
+#cities-overview .city-pressure {
+  color: #ef9a9a;
+}
+
 #ui-container {
   position: absolute;
   bottom: 0;
@@ -308,6 +359,17 @@ body, html {
   color: #888;
   border-color: #444;
   cursor: not-allowed;
+}
+
+.focus-select {
+  background: #263238;
+  color: #e8e8e8;
+  border: 1px solid #78909c;
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-weight: 600;
+  pointer-events: auto;
+  max-width: 160px;
 }
 
 .queue-hint {

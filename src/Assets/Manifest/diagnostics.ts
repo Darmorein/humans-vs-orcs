@@ -15,6 +15,7 @@ const BUILDING_TYPES: BuildingType[] = [
   'PigFarm',
   'Blacksmith',
   'Fort',
+  'Outpost',
   'Temple',
   'Market',
   'Wall',

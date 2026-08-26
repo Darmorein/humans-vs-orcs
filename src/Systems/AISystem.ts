@@ -1,6 +1,6 @@
 import { Entity } from '../Entities/Entity';
 import { Unit } from '../Entities/Unit';
-import { Building, isMainBuilding, isEconomyBuilding } from '../Entities/Building';
+import { Building, isMainBuilding, isEconomyBuilding, type BuildingType } from '../Entities/Building';
 import { ResourceNode } from '../Entities/ResourceNode';
 import type { GameMap } from '../Map/GameMap';
 import { canPlaceBuildingAt } from '../Map/BuildPlacement';
@@ -16,6 +16,11 @@ import {
 } from '../Combat/TacticalTerrain';
 import { doctrineOf } from '../Players/FactionDoctrine';
 import type { SquadSystem } from '../Combat/SquadSystem';
+import type { GameCommand } from '../Sim/Commands';
+import type { GameRng } from '../Sim/GameRng';
+import { TAX_POLICY_COOLDOWN_TICKS, type TaxPolicy } from '../Players/TaxPolicy';
+import { OUTPOST_TREASURY_COST } from '../Settlement/SettlementSystem';
+import { getRecipe, treasuryGoldCost } from '../Settlement/ConstructionCatalog';
 import {
   analyzeStrategicSituation,
   chooseStrategicState,
@@ -24,14 +29,9 @@ import {
   type StrategicState,
 } from './StrategicAI';
 
-type TrainableUnit =
-  | FactionDefinition['workerType']
-  | FactionDefinition['meleeType']
-  | FactionDefinition['rangedType'];
-
 /**
  * Strategic AI for any faction seat.
- * Uses the same settlement queue, settlers, gold training, and buildings as the player.
+ * Issues GameCommands only — never mutates units/buildings/economy for orders.
  * Posture comes from world analysis — not fixed "spawn N every T seconds".
  */
 export class AISystem {
@@ -58,11 +58,52 @@ export class AISystem {
   private settlements: SettlementSystem | null = null;
   private squads: SquadSystem | null = null;
   private influence: InfluenceMap | null = null;
+  private submitCommand: ((cmd: GameCommand) => void) | null = null;
+  private rng: GameRng | null = null;
+  private simTick = 0;
 
   public readonly playerId: string;
 
   constructor(playerId: string) {
     this.playerId = playerId;
+  }
+
+  public captureSoftState(): import('../Sim/SoftSimState').AiSoftState {
+    return {
+      playerId: this.playerId,
+      state: this.state,
+      stateReason: this.stateReason,
+      secondsInState: this.secondsInState,
+      elapsed: this.elapsed,
+      thinkTimer: this.thinkTimer,
+      actionTimer: this.actionTimer,
+      nextActionIn: this.nextActionIn,
+      expansionCooldown: this.expansionCooldown,
+      guardIds: [...this.guardIds],
+      assaultIds: [...this.assaultIds],
+      harassIds: [...this.harassIds],
+      pendingTargetId: [...this.pendingTargetId.entries()].map(([unitId, targetId]) => ({
+        unitId,
+        targetId,
+      })),
+      assaultStartCount: this.assaultStartCount,
+    };
+  }
+
+  public restoreSoftState(s: import('../Sim/SoftSimState').AiSoftState) {
+    this.state = s.state as StrategicState;
+    this.stateReason = s.stateReason;
+    this.secondsInState = s.secondsInState;
+    this.elapsed = s.elapsed;
+    this.thinkTimer = s.thinkTimer;
+    this.actionTimer = s.actionTimer;
+    this.nextActionIn = s.nextActionIn;
+    this.expansionCooldown = s.expansionCooldown;
+    this.guardIds = new Set(s.guardIds);
+    this.assaultIds = new Set(s.assaultIds);
+    this.harassIds = new Set(s.harassIds);
+    this.pendingTargetId = new Map(s.pendingTargetId.map((p) => [p.unitId, p.targetId]));
+    this.assaultStartCount = s.assaultStartCount;
   }
 
   public update(
@@ -73,12 +114,20 @@ export class AISystem {
     settlements?: SettlementSystem,
     squads?: SquadSystem,
     influence?: InfluenceMap,
+    submitCommand?: (cmd: GameCommand) => void,
+    rng?: GameRng,
+    simTick?: number,
   ) {
     this.match = match ?? MatchState.current;
     this.settlements = settlements ?? null;
     this.squads = squads ?? null;
     this.influence = influence ?? null;
-    if (!this.match || !this.getPlayer() || !this.settlements) return;
+    this.submitCommand = submitCommand ?? null;
+    this.rng = rng ?? null;
+    if (typeof simTick === 'number') this.simTick = simTick;
+    if (!this.match || !this.getPlayer() || !this.settlements || !this.submitCommand || !this.rng) {
+      return;
+    }
 
     this.elapsed += dt;
     this.thinkTimer += dt;
@@ -88,15 +137,17 @@ export class AISystem {
 
     this.cleanupRoles(entities);
     this.defendBase(entities, gameMap);
-    this.fleePeons(entities);
     this.advanceWaypoints(entities);
 
     if (this.thinkTimer >= this.thinkInterval) {
       this.thinkTimer = 0;
       this.reassess(entities, gameMap);
-      this.manageWorkers(entities);
-      this.manageConstruction(entities);
+      this.manageTaxPolicy();
+      this.manageCityFocuses();
+      this.manageEconomyTerritory(entities, gameMap);
+      this.manageConstruction(entities, gameMap);
       this.manageTraining(entities);
+      this.tryEstablishOutpost(entities, gameMap);
       this.tryExpandSettlement(entities, gameMap);
       this.positionGuards(entities, gameMap);
       this.checkRetreat(entities, gameMap);
@@ -108,6 +159,58 @@ export class AISystem {
         this.nextActionIn = this.scheduleNextAction();
       }
     }
+  }
+
+  private enqueue(cmd: GameCommand) {
+    this.submitCommand?.(cmd);
+  }
+
+  private orderMove(unit: Unit, x: number, y: number, seenSquads?: Set<string>) {
+    const squad = this.squads?.getForUnit(unit);
+    if (squad) {
+      if (seenSquads) {
+        if (seenSquads.has(squad.id)) return;
+        seenSquads.add(squad.id);
+      }
+      this.enqueue({
+        type: 'moveSquad',
+        playerId: this.playerId,
+        squadId: squad.id,
+        x,
+        y,
+      });
+      return;
+    }
+    this.enqueue({
+      type: 'moveAgents',
+      playerId: this.playerId,
+      unitIds: [unit.id],
+      x,
+      y,
+    });
+  }
+
+  private orderAttack(unit: Unit, target: Entity, seenSquads?: Set<string>) {
+    const squad = this.squads?.getForUnit(unit);
+    if (squad) {
+      if (seenSquads) {
+        if (seenSquads.has(squad.id)) return;
+        seenSquads.add(squad.id);
+      }
+      this.enqueue({
+        type: 'attack',
+        playerId: this.playerId,
+        squadId: squad.id,
+        targetEntityId: target.id,
+      });
+      return;
+    }
+    this.enqueue({
+      type: 'attack',
+      playerId: this.playerId,
+      unitIds: [unit.id],
+      targetEntityId: target.id,
+    });
   }
 
   private reassess(entities: Entity[], gameMap?: GameMap) {
@@ -154,21 +257,22 @@ export class AISystem {
   }
 
   private scheduleNextAction(): number {
+    const rng = this.rng!;
     const d = doctrineOf(this.getFaction()?.id ?? 'orcs');
     const base = (() => {
       switch (this.state) {
         case 'develop':
         case 'expand':
         case 'recover':
-          return 36 + Math.random() * 14;
+          return 36 + rng.next() * 14;
         case 'fortify':
-          return 28 + Math.random() * 10;
+          return 28 + rng.next() * 10;
         case 'defend':
-          return 16 + Math.random() * 8;
+          return 16 + rng.next() * 8;
         case 'raid':
-          return 22 + Math.random() * 10;
+          return 22 + rng.next() * 10;
         case 'attack':
-          return 14 + Math.random() * 8;
+          return 14 + rng.next() * 8;
       }
     })();
     return base * d.aiActionIntervalMul;
@@ -178,8 +282,77 @@ export class AISystem {
     return this.getPlayer()?.gold ?? 0;
   }
 
-  private trySpend(amount: number): boolean {
-    return this.match?.trySpend(this.playerId, amount) ?? false;
+  /**
+   * Tax policy hysteresis: Recover/Develop → low/normal;
+   * Attack prep → high; low treasury + Attack → war.
+   */
+  private manageTaxPolicy() {
+    const player = this.getPlayer();
+    if (!player) return;
+    if (
+      player.lastTaxChangeTick > 0 &&
+      this.simTick - player.lastTaxChangeTick < TAX_POLICY_COOLDOWN_TICKS
+    ) {
+      return;
+    }
+
+    let desired: TaxPolicy = 'normal';
+    if (this.state === 'recover' || this.state === 'develop' || this.state === 'expand') {
+      desired = this.state === 'recover' ? 'low' : 'normal';
+    } else if (this.state === 'fortify' || this.state === 'defend') {
+      desired = 'normal';
+    } else if (this.state === 'raid' || this.state === 'attack') {
+      desired = player.gold < 120 ? 'war' : 'high';
+    }
+
+    // Mild hysteresis: don't flip war↔low without staying in state a bit.
+    if (desired === player.taxPolicy) return;
+    if (
+      (player.taxPolicy === 'war' || player.taxPolicy === 'high') &&
+      (desired === 'low' || desired === 'normal') &&
+      this.secondsInState < 12
+    ) {
+      return;
+    }
+
+    this.enqueue({
+      type: 'setTaxPolicy',
+      playerId: this.playerId,
+      policy: desired,
+    });
+  }
+
+  /**
+   * Multi-city roles: capital economy/crafting, frontier military/defense.
+   * Only when 2+ seats; does not spam every tick (focus already set).
+   */
+  private manageCityFocuses() {
+    if (!this.settlements) return;
+    const player = this.getPlayer();
+    if (!player) return;
+    const seats = this.settlements
+      .allForOwner(this.playerId)
+      .filter((s) => s.hasTownCenter);
+    if (seats.length < 2) return;
+
+    const capitalId = player.capitalSettlementId;
+    for (const s of seats) {
+      const isCap = capitalId === s.id || (!capitalId && s === seats[0]);
+      const want = isCap
+        ? player.factionId === 'humans'
+          ? 'crafting'
+          : 'economy'
+        : s.threatPressure > 0.35
+          ? 'defense'
+          : 'military';
+      if (s.focus === want) continue;
+      this.enqueue({
+        type: 'setSettlementFocus',
+        playerId: this.playerId,
+        settlementId: s.id,
+        focus: want,
+      });
+    }
   }
 
   private getMainBuilding(entities: Entity[]): Building | undefined {
@@ -213,15 +386,6 @@ export class AISystem {
     );
   }
 
-  private getWorkers(entities: Entity[]): Unit[] {
-    const faction = this.getFaction();
-    if (!faction) return [];
-    return entities.filter(
-      (e): e is Unit =>
-        e instanceof Unit && !e.isDead && this.isOwn(e) && e.unitType === faction.workerType,
-    );
-  }
-
   private cleanupRoles(entities: Entity[]) {
     const alive = new Set(entities.filter((e) => !e.isDead).map((e) => e.id));
     for (const set of [this.guardIds, this.assaultIds, this.harassIds]) {
@@ -234,37 +398,65 @@ export class AISystem {
     }
   }
 
-  // --- Economy (same tools as the player) --------------------------------
+  // --- Economy (territorial — no Worker gather micro) --------------------
 
-  private manageWorkers(entities: Entity[]) {
+  private manageEconomyTerritory(entities: Entity[], gameMap?: GameMap) {
     const main = this.getMainBuilding(entities);
-    if (!main) return;
+    const settlement = this.settlements?.get(this.playerId);
+    if (!main || !settlement) return;
+    void gameMap;
 
-    const mines = this.findMinesNear(entities, main, this.state === 'develop' ? 3 : 2);
-    if (mines.length === 0) return;
-
-    const workers = this.getWorkers(entities);
-    const builders = workers.filter((p) => p.buildTarget).length;
-    const reserveBuilders =
-      this.state === 'develop' || this.state === 'fortify' || this.state === 'recover' ? 2 : 1;
-
-    let mineIndex = 0;
-    for (const worker of workers) {
-      if (worker.buildTarget || worker.targetEntity) continue;
-      if (
-        builders < reserveBuilders &&
-        !worker.gatherTarget &&
-        workers.indexOf(worker) < reserveBuilders
-      ) {
-        continue;
+    // Protect linked mines: send a guard squad near threatened deposits.
+    const mines = this.findMinesNear(entities, main, 3);
+    for (const mine of mines) {
+      if (mine.raidDamageCooldown <= 0) continue;
+      const military = this.getMilitary(entities);
+      if (military.length === 0) break;
+      const guard = military[0]!;
+      if (Math.hypot(guard.x - mine.x, guard.y - mine.y) > 160) {
+        this.orderMove(guard, mine.x + 30, mine.y + 30);
       }
-      if (worker.gatherTarget) continue;
-      if (worker.targetX !== null) continue;
-
-      const mine = mines[mineIndex % mines.length]!;
-      mineIndex++;
-      worker.gatherCommand(mine);
+      break;
     }
+  }
+
+  private tryEstablishOutpost(entities: Entity[], gameMap?: GameMap) {
+    if (!gameMap) return;
+    const main = this.getMainBuilding(entities);
+    const settlement = this.settlements?.get(this.playerId);
+    const player = this.getPlayer();
+    if (!main || !settlement || !player) return;
+    if (settlement.outpostCount >= 2) return;
+    if (settlement.tier === 'camp' || settlement.tier === 'hamlet') return;
+    if (this.getGold() < OUTPOST_TREASURY_COST) return;
+
+    // Prefer Outpost before City2 when treasury ok mid-game.
+    const cityCount = this.settlements?.allForOwner(this.playerId).length ?? 1;
+    if (cityCount >= 2 && settlement.outpostCount >= 1 && this.elapsed < 400) return;
+
+    const military = this.getMilitary(entities);
+    if (military.length < 2) return;
+    const scout = military[military.length - 1]!;
+    const ang = (this.elapsed * 0.07) % (Math.PI * 2);
+    const dist = 180 + settlement.outpostCount * 40;
+    const x = scout.x + Math.cos(ang) * 40;
+    const y = scout.y + Math.sin(ang) * 40;
+    const ox = main.x + Math.cos(ang) * dist;
+    const oy = main.y + Math.sin(ang) * dist;
+    const site = canPlaceBuildingAt(ox, oy, gameMap, entities, 32)
+      ? { x: ox, y: oy }
+      : canPlaceBuildingAt(x, y, gameMap, entities, 32)
+        ? { x, y }
+        : null;
+    if (!site) return;
+    if (Math.hypot(site.x - main.x, site.y - main.y) < 120) return;
+
+    this.enqueue({
+      type: 'establishOutpost',
+      playerId: this.playerId,
+      x: site.x,
+      y: site.y,
+    });
   }
 
   private findMinesNear(entities: Entity[], main: Building, count: number): ResourceNode[] {
@@ -281,42 +473,47 @@ export class AISystem {
     return result;
   }
 
-  private fleePeons(entities: Entity[]) {
-    const main = this.getMainBuilding(entities);
-    if (!main) return;
-
-    for (const worker of this.getWorkers(entities)) {
-      let threatNear = false;
-      for (const e of entities) {
-        if (e.isDead || !(e instanceof Unit) || !this.isEnemy(e, worker)) continue;
-        if (Math.hypot(e.x - worker.x, e.y - worker.y) < 200) {
-          threatNear = true;
-          break;
-        }
-      }
-      if (!threatNear) continue;
-
-      const distHome = Math.hypot(worker.x - main.x, worker.y - main.y);
-      if (distHome < 90) {
-        worker.gatherTarget = null;
-        worker.buildTarget = null;
-        continue;
-      }
-
-      if (
-        worker.targetX !== null &&
-        Math.hypot(worker.targetX - main.x, worker.targetY! - main.y) < 80
-      ) {
-        continue;
-      }
-
-      worker.gatherTarget = null;
-      worker.buildTarget = null;
-      worker.moveCommand(main.x + 40, main.y + 40);
+  private pickBuildSite(
+    entities: Entity[],
+    gameMap: GameMap,
+    main: Building,
+  ): { x: number; y: number } | null {
+    const offsets = [
+      { x: main.x + 80, y: main.y + 40 },
+      { x: main.x - 80, y: main.y + 40 },
+      { x: main.x + 80, y: main.y - 40 },
+      { x: main.x - 60, y: main.y - 60 },
+      { x: main.x + 100, y: main.y },
+      { x: main.x, y: main.y + 100 },
+      { x: main.x - 100, y: main.y + 20 },
+      { x: main.x + 40, y: main.y - 100 },
+    ];
+    for (const c of offsets) {
+      if (canPlaceBuildingAt(c.x, c.y, gameMap, entities, 40)) return c;
     }
+    return this.pickExpansionSite(entities, gameMap, main.x, main.y, 1);
   }
 
-  private manageConstruction(entities: Entity[]) {
+  private queueBuildingNearMain(
+    entities: Entity[],
+    gameMap: GameMap | undefined,
+    main: Building,
+    buildingType: BuildingType,
+  ): boolean {
+    if (!gameMap) return false;
+    const site = this.pickBuildSite(entities, gameMap, main);
+    if (!site) return false;
+    this.enqueue({
+      type: 'queueBuilding',
+      playerId: this.playerId,
+      buildingType,
+      x: site.x,
+      y: site.y,
+    });
+    return true;
+  }
+
+  private manageConstruction(entities: Entity[], gameMap?: GameMap) {
     const faction = this.getFaction();
     const player = this.getPlayer();
     const main = this.getMainBuilding(entities);
@@ -328,7 +525,7 @@ export class AISystem {
         e instanceof Building && this.isOwn(e) && !e.isDead && !e.isConstructed,
     );
     if (unfinished) {
-      this.assignBuilders(entities, unfinished);
+      // Civic labor advances construction — no Worker assistBuild.
       return;
     }
 
@@ -336,12 +533,13 @@ export class AISystem {
     if (!settlement?.hasTownCenter) return;
 
     // Production — needed for any military posture; still player-queue rules.
+    const barracksNeed = this.treasuryNeed(faction.productionBuilding);
     if (
       !sit.hasProduction &&
-      this.getGold() >= 100 &&
+      this.getGold() >= barracksNeed &&
       sit.unitPop >= Math.min(4, Math.max(2, sit.unitMaxPop * 0.4))
     ) {
-      this.settlements?.enqueueStrategic(this.playerId, faction.productionBuilding);
+      this.queueBuildingNearMain(entities, gameMap, main, faction.productionBuilding);
       return;
     }
 
@@ -351,18 +549,18 @@ export class AISystem {
     // Fortify / Defend: walls & forts via the same strategic catalog as the player.
     if (
       (this.state === 'fortify' || this.state === 'defend') &&
-      this.getGold() >= 15 &&
+      this.getGold() >= this.treasuryNeed('Wall') &&
       settlement.population >= 3
     ) {
       if (
         !settlement.queue.hasQueuedOrBuilding('Wall') &&
         (sit.primaryBridgeContested || sit.safety < 0.55 || this.state === 'fortify')
       ) {
-        this.settlements?.enqueueStrategic(this.playerId, 'Wall');
+        this.queueBuildingNearMain(entities, gameMap, main, 'Wall');
         return;
       }
       if (
-        this.getGold() >= 120 &&
+        this.getGold() >= this.treasuryNeed('Fort') &&
         settlement.population >= 6 &&
         !settlement.queue.hasQueuedOrBuilding('Fort') &&
         !entities.some(
@@ -370,7 +568,7 @@ export class AISystem {
             e instanceof Building && e.buildingType === 'Fort' && !e.isDead && this.isOwn(e),
         )
       ) {
-        this.settlements?.enqueueStrategic(this.playerId, 'Fort');
+        this.queueBuildingNearMain(entities, gameMap, main, 'Fort');
         return;
       }
     }
@@ -381,7 +579,7 @@ export class AISystem {
       d.craftProsperityBias >= 1.05
     ) {
       if (
-        this.getGold() >= 80 &&
+        this.getGold() >= this.treasuryNeed('Blacksmith') &&
         settlement.population >= 5 &&
         !settlement.queue.hasQueuedOrBuilding('Blacksmith') &&
         !entities.some(
@@ -392,11 +590,11 @@ export class AISystem {
             this.isOwn(e),
         )
       ) {
-        this.settlements?.enqueueStrategic(this.playerId, 'Blacksmith');
+        this.queueBuildingNearMain(entities, gameMap, main, 'Blacksmith');
         return;
       }
       if (
-        this.getGold() >= 70 &&
+        this.getGold() >= this.treasuryNeed('Market') &&
         settlement.population >= 4 &&
         !settlement.queue.hasQueuedOrBuilding('Market') &&
         !entities.some(
@@ -404,7 +602,7 @@ export class AISystem {
             e instanceof Building && e.buildingType === 'Market' && !e.isDead && this.isOwn(e),
         )
       ) {
-        this.settlements?.enqueueStrategic(this.playerId, 'Market');
+        this.queueBuildingNearMain(entities, gameMap, main, 'Market');
         return;
       }
     }
@@ -412,12 +610,17 @@ export class AISystem {
     // Temple when recovering morale / culture gap
     if (
       this.state === 'recover' &&
-      this.getGold() >= 90 &&
+      this.getGold() >= this.treasuryNeed('Temple') &&
       settlement.population >= 5 &&
       !settlement.queue.hasQueuedOrBuilding('Temple')
     ) {
-      this.settlements?.enqueueStrategic(this.playerId, 'Temple');
+      this.queueBuildingNearMain(entities, gameMap, main, 'Temple');
     }
+  }
+
+  private treasuryNeed(target: BuildingType | 'Wall' | 'Fort' | 'Blacksmith' | 'Market' | 'Temple'): number {
+    const r = getRecipe(target as BuildingType);
+    return r ? treasuryGoldCost(r.costs) : 100;
   }
 
   private tryExpandSettlement(entities: Entity[], gameMap?: GameMap) {
@@ -438,9 +641,20 @@ export class AISystem {
     const maxSeats = d.expansionPressure > 1.1 ? 3 : 2;
     if (owned.length >= maxSeats) return;
 
+    // Prefer Outpost before second city when treasury can afford it mid-game.
     const primary = this.settlements.get(this.playerId);
     if (!primary?.hasTownCenter) return;
-    if (!this.settlements.canFormSettlerGroup(this.playerId, player.factionId)) return;
+    if (
+      owned.length < 2 &&
+      primary.outpostCount < 1 &&
+      this.getGold() >= OUTPOST_TREASURY_COST &&
+      this.elapsed > 90 &&
+      this.elapsed < 420
+    ) {
+      return;
+    }
+
+    if (!this.settlements.canFormSettlerGroup(this.playerId, player.factionId, this.match ?? undefined)) return;
 
     const site = this.pickExpansionSite(
       entities,
@@ -451,18 +665,14 @@ export class AISystem {
     );
     if (!site) return;
 
-    const ok = this.settlements.orderFoundSettlement(
-      this.playerId,
-      site.x,
-      site.y,
-      entities,
-      player.factionId,
-    );
-    if (ok) {
-      this.expansionCooldown = 75 / Math.max(0.5, d.expansionPressure);
-      const s = this.settlements.get(this.playerId);
-      if (s) player.gold = s.gold;
-    }
+    this.enqueue({
+      type: 'foundSettlement',
+      playerId: this.playerId,
+      x: site.x,
+      y: site.y,
+      formGroupIfNeeded: true,
+    });
+    this.expansionCooldown = 75 / Math.max(0.5, d.expansionPressure);
   }
 
   private pickExpansionSite(
@@ -472,16 +682,17 @@ export class AISystem {
     cy: number,
     pressure: number,
   ): { x: number; y: number } | null {
+    const rng = this.rng!;
     const enemyMain = this.getEnemyMainBuilding(entities);
     const preferTowardEnemy = pressure > 1 && this.state === 'expand';
     const baseAngle = enemyMain
       ? Math.atan2(enemyMain.y - cy, enemyMain.x - cx)
-      : Math.random() * Math.PI * 2;
-    const dist = preferTowardEnemy ? 280 + Math.random() * 120 : 220 + Math.random() * 160;
+      : rng.angle();
+    const dist = preferTowardEnemy ? 280 + rng.next() * 120 : 220 + rng.next() * 160;
 
     for (let i = 0; i < 12; i++) {
       const a = preferTowardEnemy
-        ? baseAngle + (Math.random() - 0.5) * 0.9
+        ? baseAngle + (rng.next() - 0.5) * 0.9
         : baseAngle + (i / 12) * Math.PI * 2;
       const x = cx + Math.cos(a) * dist;
       const y = cy + Math.sin(a) * (dist * 0.85);
@@ -502,28 +713,17 @@ export class AISystem {
       const squad = this.squads.getForUnit(u);
       if (!squad || seen.has(squad.id)) continue;
       seen.add(squad.id);
-      this.squads.setFormation(squad, formation);
-    }
-  }
-
-  private assignBuilders(entities: Entity[], building: Building) {
-    const workers = this.getWorkers(entities);
-    let assigned = 0;
-    for (const worker of workers) {
-      if (assigned >= 2) break;
-      if (worker.buildTarget === building) {
-        assigned++;
-        continue;
-      }
-      if (worker.buildTarget || worker.targetEntity) continue;
-      worker.buildCommand(building);
-      assigned++;
+      this.enqueue({
+        type: 'changeFormation',
+        playerId: this.playerId,
+        squadId: squad.id,
+        formation,
+      });
     }
   }
 
   /**
-   * Train to close gaps vs situation — workers when developing, military when threatened.
-   * Costs go through MatchState.trySpend (same as the local player).
+   * Train military when threatened / expanding. Workers are no longer trained.
    */
   private manageTraining(entities: Entity[]) {
     const faction = this.getFaction();
@@ -532,22 +732,8 @@ export class AISystem {
     if (!faction || !main || !sit) return;
     if (sit.unitPop >= sit.unitMaxPop) return;
 
-    const workers = this.getWorkers(entities).length;
     const military = this.getMilitary(entities);
-    const workerTarget = this.desiredWorkers(sit);
     const militaryTarget = this.desiredMilitary(sit);
-
-    const needWorkers =
-      workers < workerTarget &&
-      (this.state === 'develop' ||
-        this.state === 'expand' ||
-        this.state === 'recover' ||
-        workers < 3);
-
-    if (needWorkers && this.getGold() >= 50) {
-      this.spawnUnit(entities, main, faction.workerType, 50);
-      return;
-    }
 
     const barracks = entities.find(
       (e): e is Building =>
@@ -563,20 +749,20 @@ export class AISystem {
 
     const preferRanged = this.shouldTrainRanged(entities, faction, military);
     if (preferRanged && this.getGold() >= 100) {
-      this.spawnUnit(entities, barracks, faction.rangedType, 100);
+      this.enqueue({
+        type: 'trainUnit',
+        playerId: this.playerId,
+        buildingId: barracks.id,
+        unitType: faction.rangedType,
+      });
     } else {
-      this.spawnUnit(entities, barracks, faction.meleeType, 80);
+      this.enqueue({
+        type: 'trainUnit',
+        playerId: this.playerId,
+        buildingId: barracks.id,
+        unitType: faction.meleeType,
+      });
     }
-  }
-
-  private desiredWorkers(sit: StrategicSituation): number {
-    let n = 4;
-    if (sit.nearbyMineCount >= 2) n += 1;
-    if (sit.topNeed === 'food' || sit.topNeed === 'housing') n += 1;
-    if (this.state === 'develop' || this.state === 'expand') n += 1;
-    if (this.state === 'recover') n += 2;
-    if (sit.unfinishedBuilds > 0) n += 1;
-    return Math.min(8, n);
   }
 
   private desiredMilitary(sit: StrategicSituation): number {
@@ -635,50 +821,6 @@ export class AISystem {
     return prefer;
   }
 
-  private spawnUnit(
-    entities: Entity[],
-    building: Building,
-    type: TrainableUnit,
-    cost: number,
-  ) {
-    const player = this.getPlayer();
-    if (!player) return;
-    const faction = this.getFaction();
-    const d = doctrineOf(player.factionId);
-    const isMilitary =
-      !!faction && (type === faction.meleeType || type === faction.rangedType);
-    const paid = Math.floor(cost * (isMilitary ? d.militaryTrainGoldMul : 1));
-    if (!this.trySpend(paid)) return;
-
-    const options = this.unitOptions(type);
-    const angle = Math.random() * Math.PI * 2;
-    const dist = 55 + Math.random() * 25;
-    entities.push(
-      new Unit(
-        building.x + Math.cos(angle) * dist,
-        building.y + Math.sin(angle) * dist,
-        player,
-        options,
-      ),
-    );
-  }
-
-  private unitOptions(type: TrainableUnit) {
-    switch (type) {
-      case 'Worker':
-      case 'Peon':
-        return { hp: 40, speed: 70, unitType: type, damage: 3, range: 25 };
-      case 'Swordsman':
-        return { hp: 100, speed: 60, unitType: type, damage: 15, range: 25 };
-      case 'Grunt':
-        return { hp: 130, speed: 52, unitType: type, damage: 18, range: 28 };
-      case 'Archer':
-        return { hp: 60, speed: 60, unitType: type, damage: 10, range: 150 };
-      case 'SpearOrc':
-        return { hp: 80, speed: 56, unitType: type, damage: 11, range: 120 };
-    }
-  }
-
   // --- Defense -----------------------------------------------------------
 
   private findThreatsNear(
@@ -708,6 +850,7 @@ export class AISystem {
     const threats = this.findThreatsNear(entities, main.x, main.y, radius, main);
     if (threats.length === 0) return;
 
+    const seenSquads = new Set<string>();
     for (const unit of this.getMilitary(entities)) {
       if (this.state === 'defend' && (this.assaultIds.has(unit.id) || this.harassIds.has(unit.id))) {
         this.assaultIds.delete(unit.id);
@@ -728,7 +871,7 @@ export class AISystem {
         }
       }
       if (closest) {
-        unit.attackCommand(closest);
+        this.orderAttack(unit, closest, seenSquads);
         this.guardIds.add(unit.id);
       }
     }
@@ -770,6 +913,7 @@ export class AISystem {
       guards = military.filter((u) => this.guardIds.has(u.id));
     }
 
+    const seenSquads = new Set<string>();
     for (const guard of guards) {
       if (guard.targetEntity && !guard.targetEntity.isDead) continue;
 
@@ -792,7 +936,7 @@ export class AISystem {
       });
       const stand = best ?? homeSide;
       if (Math.hypot(guard.x - stand.x, guard.y - stand.y) > 70) {
-        guard.moveCommand(stand.x, stand.y);
+        this.orderMove(guard, stand.x, stand.y, seenSquads);
       }
     }
   }
@@ -812,6 +956,7 @@ export class AISystem {
     const military = this.getMilitary(entities);
     const free = military.filter((u) => !this.guardIds.has(u.id));
     const sit = this.situation;
+    const rng = this.rng!;
 
     if (this.state === 'defend') {
       // Light counter-raid only when we still have spare force at home.
@@ -821,7 +966,7 @@ export class AISystem {
 
     if (this.state === 'raid') {
       const size = sit && sit.armyRatio >= 1.0 ? 3 : 2;
-      if (free.length >= 4 && Math.random() < (sit?.doctrineHarass ?? 0.5) * 0.35) {
+      if (free.length >= 4 && rng.chance((sit?.doctrineHarass ?? 0.5) * 0.35)) {
         return this.launchAssault(entities, free, gameMap, false);
       }
       return this.launchHarass(entities, free, gameMap, size);
@@ -854,6 +999,8 @@ export class AISystem {
       waypoint = gameMap.findAlternateBridge(primary) ?? primary;
     }
 
+    const seenMove = new Set<string>();
+    const seenAttack = new Set<string>();
     for (const unit of squad) {
       this.harassIds.add(unit.id);
       this.assaultIds.delete(unit.id);
@@ -867,7 +1014,7 @@ export class AISystem {
           enemiesNearby: enemies,
         });
         if (best && best.assessment.total >= 8) {
-          unit.moveCommand(best.x, best.y);
+          this.orderMove(unit, best.x, best.y, seenMove);
           this.pendingTargetId.set(unit.id, target.id);
           continue;
         }
@@ -882,10 +1029,10 @@ export class AISystem {
           const scored = pickBestHoldPoint(gameMap, opts, { enemiesNearby: 2 });
           if (scored) dest = scored;
         }
-        unit.moveCommand(dest.x, dest.y);
+        this.orderMove(unit, dest.x, dest.y, seenMove);
         this.pendingTargetId.set(unit.id, target.id);
       } else {
-        unit.attackCommand(target);
+        this.orderAttack(unit, target, seenAttack);
         this.pendingTargetId.delete(unit.id);
       }
     }
@@ -926,6 +1073,9 @@ export class AISystem {
       waypoint = gameMap.findAlternateBridge(bridge) ?? bridge;
     }
 
+    const rng = this.rng!;
+    const seenMove = new Set<string>();
+    const seenAttack = new Set<string>();
     for (const unit of squad) {
       this.assaultIds.add(unit.id);
       this.harassIds.delete(unit.id);
@@ -943,7 +1093,7 @@ export class AISystem {
           best.assessment.total >= 10 &&
           Math.hypot(unit.x - target.x, unit.y - target.y) > 220
         ) {
-          unit.moveCommand(best.x, best.y);
+          this.orderMove(unit, best.x, best.y, seenMove);
           this.pendingTargetId.set(unit.id, target.id);
           continue;
         }
@@ -960,13 +1110,15 @@ export class AISystem {
           });
           if (scored) dest = scored;
         }
-        unit.moveCommand(
-          dest.x + (Math.random() - 0.5) * 30,
-          dest.y + (Math.random() - 0.5) * 30,
+        this.orderMove(
+          unit,
+          dest.x + (rng.next() - 0.5) * 30,
+          dest.y + (rng.next() - 0.5) * 30,
+          seenMove,
         );
         this.pendingTargetId.set(unit.id, target.id);
       } else {
-        unit.attackCommand(target);
+        this.orderAttack(unit, target, seenAttack);
         this.pendingTargetId.delete(unit.id);
       }
     }
@@ -986,6 +1138,7 @@ export class AISystem {
 
   private advanceWaypoints(entities: Entity[]) {
     const byId = new Map(entities.map((e) => [e.id, e]));
+    const seenAttack = new Set<string>();
 
     for (const unit of this.getMilitary(entities)) {
       const pendingId = this.pendingTargetId.get(unit.id);
@@ -998,7 +1151,7 @@ export class AISystem {
       }
 
       const target = byId.get(pendingId);
-      if (target && !target.isDead) unit.attackCommand(target);
+      if (target && !target.isDead) this.orderAttack(unit, target, seenAttack);
       this.pendingTargetId.delete(unit.id);
     }
   }
@@ -1021,13 +1174,14 @@ export class AISystem {
         ? gameMap.findBridgeToward(main.x, main.y, enemyMain.x, enemyMain.y)
         : null;
 
+    const seenMove = new Set<string>();
     for (const unit of assault) {
       this.assaultIds.delete(unit.id);
       this.harassIds.delete(unit.id);
       this.guardIds.add(unit.id);
       this.pendingTargetId.delete(unit.id);
-      if (bridge) unit.moveCommand(bridge.x, bridge.y);
-      else unit.moveCommand(main.x, main.y);
+      if (bridge) this.orderMove(unit, bridge.x, bridge.y, seenMove);
+      else this.orderMove(unit, main.x, main.y, seenMove);
     }
 
     this.assaultStartCount = 0;
@@ -1050,26 +1204,6 @@ export class AISystem {
   }
 
   private pickHarassTarget(entities: Entity[]): Entity | null {
-    const enemyWorkers = entities.filter(
-      (e): e is Unit =>
-        e instanceof Unit &&
-        !e.isDead &&
-        this.isEnemy(e) &&
-        (e.unitType === 'Worker' || e.unitType === 'Peon'),
-    );
-
-    if (enemyWorkers.length > 0) {
-      const enemyMain = this.getEnemyMainBuilding(entities);
-      enemyWorkers.sort((a, b) => {
-        if (!enemyMain) return 0;
-        return (
-          Math.hypot(b.x - enemyMain.x, b.y - enemyMain.y) -
-          Math.hypot(a.x - enemyMain.x, a.y - enemyMain.y)
-        );
-      });
-      return enemyWorkers[0]!;
-    }
-
     const enemyMain = this.getEnemyMainBuilding(entities);
     if (enemyMain) {
       let bestMine: ResourceNode | null = null;
@@ -1077,19 +1211,12 @@ export class AISystem {
       for (const e of entities) {
         if (!(e instanceof ResourceNode) || e.isDead) continue;
         const dist = Math.hypot(e.x - enemyMain.x, e.y - enemyMain.y);
-        if (dist < 500 && dist < bestDist) {
+        if (dist < 560 && dist < bestDist) {
           bestDist = dist;
           bestMine = e;
         }
       }
-      if (bestMine) {
-        for (const e of entities) {
-          if (e.isDead || !this.isEnemy(e)) continue;
-          if (e instanceof Building && !isMainBuilding(e.buildingType)) {
-            if (Math.hypot(e.x - bestMine.x, e.y - bestMine.y) < 350) return e;
-          }
-        }
-      }
+      if (bestMine) return bestMine;
     }
 
     const economy = entities.find(

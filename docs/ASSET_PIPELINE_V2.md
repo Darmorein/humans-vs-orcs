@@ -9,7 +9,7 @@ promoted to `production`.
 | Property | Value |
 | --- | --- |
 | Projection | fixed 2:1 isometric |
-| Authoring tile | 128Ã—64 px |
+| Authoring tile | 128×64 px |
 | Runtime map cell | 28 world units |
 | Light | upper-left |
 | Unit pivot | ground contact between the feet |
@@ -25,10 +25,10 @@ Initial building placement sizes:
 
 | Role | Humans | Orcs | Tiles |
 | --- | --- | --- | --- |
-| Main | Town Hall | Stronghold | 4Ã—4 |
-| Production | Barracks | Barracks | 3Ã—2 |
-| Economy | Farm | War Hut | 2Ã—2 |
-| Defense | Watchtower | Spike Tower | 1Ã—1 |
+| Main | Town Hall | Stronghold | 4×4 |
+| Production | Barracks | Barracks | 3×2 |
+| Economy | Farm | War Hut | 2×2 |
+| Defense | Watchtower | Spike Tower | 1×1 |
 
 ## Runtime authority
 
@@ -38,7 +38,7 @@ the resolved entry as their primary source of truth:
 - `worldScale` and `pivotY` control sprite drawing;
 - `collisionFootprint` sets the circular collision body's conservative radius;
 - `selectionRadius` controls click targeting and the rendered selection ring;
-- `footprint` and `footprintTiles Ã— worldUnitsPerTile` determine building
+- `footprint` and `footprintTiles × worldUnitsPerTile` determine building
   placement clearance (the larger extent wins);
 - the placement preview uses that same resolved clearance.
 
@@ -68,7 +68,7 @@ zero-based `releaseFrame`. Frames cannot be reused by two clips in one sheet.
 Recommended sheet rules:
 
 - 2 px transparent padding and 2 px spacing;
-- power-of-two atlases up to 4096Ã—4096;
+- power-of-two atlases up to 4096×4096;
 - identical frame dimensions and ground pivot across every direction;
 - no baked selection ring or player color;
 - transparent RGBA background.
@@ -81,8 +81,8 @@ state priority is `death`, `hit`, `attack`, `walk`, then `idle`; these states
 only reflect facts already established by gameplay.
 
 The direction adapter reads `Unit.facingX` and `Unit.facingY` in world space.
-The dominant axis maps as follows: `+X â†’ SE`, `+Y â†’ SW`, `-X â†’ NW`, and
-`-Y â†’ NE`. Exact `|X| === |Y|` ties use X, while near-zero vectors keep the
+The dominant axis maps as follows: `+X ? SE`, `+Y ? SW`, `-X ? NW`, and
+`-Y ? NE`. Exact `|X| === |Y|` ties use X, while near-zero vectors keep the
 previous valid direction. Camera position and screen coordinates never affect
 the result.
 
@@ -101,7 +101,7 @@ srcX   = margin + column * (frameWidth + spacing)
 srcY   = margin + row    * (frameHeight + spacing)
 ```
 
-The drawn source rectangle always uses `frameWidth Ã— frameHeight`. Scale and
+The drawn source rectangle always uses `frameWidth × frameHeight`. Scale and
 pivot still come from the resolved asset entry.
 
 `releaseFrame` is zero-based within its clip. Crossing it emits one visual
@@ -145,6 +145,10 @@ The adapter recognizes `death`, but the current entity lifecycle removes dead
 units before the next render. Persistent corpses and visible death playback are
 intentionally deferred to a separate presentation-lifecycle change.
 
+Animation playheads, hit/attack presentation timers, and release events are not
+serialized into save games or replay snapshots. Presentation rebuilds from
+facing, movement, and combat cues after load.
+
 ## Team color
 
 Faction identity and player identity are separate. Human/Orc materials stay
@@ -166,6 +170,7 @@ Before changing `productionStatus` to `production`:
 5. Attach a team-color mask for faction-owned art.
 6. Confirm the asset path starts with `/assets/` and loads during boot.
 7. Run `npm run build`; production metadata errors block compilation/runtime boot.
+8. Run `npm test` after atlas/clip changes.
 
 Prototype assets are intentionally allowed to omit sheets, source dimensions
 and masks. Runtime diagnostics report those remaining production gaps as one

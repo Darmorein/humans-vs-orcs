@@ -21,9 +21,17 @@ export interface ConstructionProject {
 
 let nextProjectId = 1;
 
+export function getNextProjectId(): number {
+  return nextProjectId;
+}
+export function setNextProjectId(n: number) {
+  nextProjectId = Math.max(1, Math.floor(n));
+}
+
 /**
  * Ordered construction queue for one settlement.
  * Player may enqueue strategic projects, reorder, and cancel.
+ * Wall may be enqueued as strategic by AI/player or as autonomous defense need.
  */
 export class ConstructionQueue {
   private items: ConstructionProject[] = [];
@@ -50,7 +58,12 @@ export class ConstructionQueue {
     planned?: { x: number; y: number },
   ): ConstructionProject | null {
     const recipe = getRecipe(target);
-    if (!recipe || recipe.category !== category) return null;
+    if (!recipe) return null;
+    // Wall is strategic in catalog but autonomous defense may enqueue it.
+    const categoryOk =
+      recipe.category === category ||
+      (target === 'Wall' && category === 'autonomous' && recipe.category === 'strategic');
+    if (!categoryOk) return null;
     // Avoid duplicate queued autonomous of same target
     if (
       category === 'autonomous' &&
@@ -117,6 +130,14 @@ export class ConstructionQueue {
       (p) =>
         p.target === target && (p.status === 'queued' || p.status === 'building'),
     );
+  }
+
+  /** Replace queue contents from a save snapshot. */
+  public replaceAll(projects: ConstructionProject[]) {
+    this.items = projects.map((p) => ({
+      ...p,
+      roadTiles: p.roadTiles.map((t) => ({ ...t })),
+    }));
   }
 
   private prune() {

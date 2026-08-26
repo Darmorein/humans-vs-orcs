@@ -178,7 +178,7 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    if (msg.type === 'matchStart' || msg.type === 'command' || msg.type === 'chat') {
+    if (msg.type === 'matchStart' || msg.type === 'command' || msg.type === 'chat' || msg.type === 'hashSync') {
       const peer = peerOf(room, ws);
       if (!peer) return;
       if (msg.type === 'chat') {
@@ -201,7 +201,7 @@ wss.on('connection', (ws) => {
         send(peer, payload);
         return;
       }
-      // command — relay as-is
+      // command / hashSync — relay as-is
       send(peer, msg);
       return;
     }

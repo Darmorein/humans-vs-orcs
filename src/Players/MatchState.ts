@@ -5,6 +5,14 @@ import {
   type FactionId,
   type Player,
 } from './Types';
+import type { TaxPolicy } from './TaxPolicy';
+
+/** Per-settlement tax remittance for the last tax tick (UI). */
+export interface TaxContribution {
+  settlementId: string;
+  label: string;
+  amount: number;
+}
 
 export class PlayerState implements Player {
   public id: string;
@@ -12,18 +20,40 @@ export class PlayerState implements Player {
   public controllerType: ControllerType;
   public playerColor: string;
   public displayName: string;
+  /**
+   * Faction Treasury (field name kept as `gold` for save/compat).
+   * Settlement local gold lives on Settlement — do not mirror.
+   */
   public gold: number;
   public pop = 0;
   public maxPop = 0;
   public isDefeated = false;
 
-  constructor(init: Player & { gold?: number }) {
+  /** Faction tax take on settlement taxable surplus. */
+  public taxPolicy: TaxPolicy = 'normal';
+  /** Sim tick of last successful SetTaxPolicy (cooldown gate). */
+  public lastTaxChangeTick = 0;
+  /** Rolling treasury income from taxes (gold/sec, UI). */
+  public treasuryIncomeRate = 0;
+  /** Last tax-tick remittances for HUD / settlement panel. */
+  public taxContributions: TaxContribution[] = [];
+  /**
+   * Designated capital settlement seat id.
+   * Set on first TC reconcile / spawn; capital destroy is primary victory.
+   */
+  public capitalSettlementId: string | null = null;
+
+  constructor(init: Player & { gold?: number; taxPolicy?: TaxPolicy; capitalSettlementId?: string | null }) {
     this.id = init.id;
     this.factionId = init.factionId;
     this.controllerType = init.controllerType;
     this.playerColor = init.playerColor;
     this.displayName = init.displayName;
     this.gold = init.gold ?? 300;
+    if (init.taxPolicy) this.taxPolicy = init.taxPolicy;
+    if (init.capitalSettlementId !== undefined) {
+      this.capitalSettlementId = init.capitalSettlementId;
+    }
   }
 
   public get faction() {
@@ -40,6 +70,10 @@ export class MatchState {
 
   public readonly players = new Map<string, PlayerState>();
   public localPlayerId: string;
+  /** Sim seconds since match start (for soft dominance). */
+  public matchElapsedSec = 0;
+  /** After MATCH_SOFT_CAP_SEC — mild score pressure / optional soft resolve. */
+  public dominancePhase = false;
 
   constructor(players: PlayerState[], localPlayerId: string) {
     for (const p of players) this.players.set(p.id, p);

@@ -4,6 +4,11 @@ import { FACTIONS } from '../Players/Types';
 import { doctrineOf } from '../Players/FactionDoctrine';
 import type { MatchState } from '../Players/MatchState';
 import type { Settlement } from '../Settlement/Settlement';
+import type { Entity } from '../Entities/Entity';
+import { Building, isOutpostBuilding } from '../Entities/Building';
+import { Unit } from '../Entities/Unit';
+import { isCombatUnitType } from '../Combat/Squad';
+import { CAPITAL_INFLUENCE_STRENGTH_MUL } from '../Match/MatchPacing';
 
 /** Control of one influence cell — no province IDs. */
 export type TerritoryControl = 'none' | 'contested' | FactionId;
@@ -16,16 +21,14 @@ export interface InfluenceSource {
   strength: number;
   /** World-distance at which contribution reaches 0. */
   range: number;
+  /** Temporary military pressure — contests but does not permanently own alone. */
+  temporary?: boolean;
 }
 
 const CELL = 56;
 const UPDATE_INTERVAL = 0.45;
 /** Below this peak on a cell → unclaimed wilderness. */
 const MIN_CLAIM = 8;
-/**
- * When runner-up / leader ≥ this, or absolute gap is tiny → Contested.
- * e.g. Humans 42 / Orcs 37 ≈ 0.88 → Contested.
- */
 const CONTEST_RATIO = 0.88;
 const CONTEST_ABS_GAP = 6;
 
@@ -33,8 +36,7 @@ const FACTION_ORDER: FactionId[] = ['humans', 'orcs'];
 
 /**
  * Continuous influence field over the world (no provinces).
- * Settlements radiate power from population, prosperity, safety,
- * infrastructure and prestige; control shifts as those change.
+ * Settlements / outposts radiate permanent control; combat squads add temporary pressure.
  */
 export class InfluenceMap {
   public readonly cellSize = CELL;
@@ -45,12 +47,13 @@ export class InfluenceMap {
   private readonly worldW: number;
   private readonly worldH: number;
 
-  /** Per-faction stacked influence at cell centers. */
   private readonly byFaction: Record<FactionId, Float32Array>;
-  private readonly control: Uint8Array; // 0 none, 1 contested, 2 humans, 3 orcs
+  private readonly militaryPressure: Record<FactionId, Float32Array>;
+  private readonly control: Uint8Array;
 
   private accum = 0;
   private keyHeld = false;
+  private lastEntities: Entity[] = [];
 
   constructor(mapWidth: number, mapHeight: number) {
     this.worldW = mapWidth;
@@ -62,29 +65,42 @@ export class InfluenceMap {
       humans: new Float32Array(n),
       orcs: new Float32Array(n),
     };
+    this.militaryPressure = {
+      humans: new Float32Array(n),
+      orcs: new Float32Array(n),
+    };
     this.control = new Uint8Array(n);
   }
 
-  /** Edge-toggle for territory overlay (default KeyT). */
   public handleToggleInput(keys: Record<string, boolean>, code = 'KeyT') {
     const down = !!keys[code];
     if (down && !this.keyHeld) this.overlayVisible = !this.overlayVisible;
     this.keyHeld = down;
   }
 
-  public update(dt: number, settlements: Settlement[], match: MatchState) {
+  public update(dt: number, settlements: Settlement[], match: MatchState, entities?: Entity[]) {
+    if (entities) this.lastEntities = entities;
     this.accum += dt;
     if (this.accum < UPDATE_INTERVAL) return;
     this.accum = 0;
-    this.rebuild(settlements, match);
+    this.rebuild(settlements, match, this.lastEntities);
   }
 
-  /** Force immediate rebuild (e.g. after load). */
-  public rebuild(settlements: Settlement[], match: MatchState) {
+  public getAccum(): number {
+    return this.accum;
+  }
+
+  public setAccum(v: number) {
+    this.accum = Math.max(0, v);
+  }
+
+  public rebuild(settlements: Settlement[], match: MatchState, entities: Entity[] = []) {
     this.byFaction.humans.fill(0);
     this.byFaction.orcs.fill(0);
+    this.militaryPressure.humans.fill(0);
+    this.militaryPressure.orcs.fill(0);
 
-    const sources = this.collectSources(settlements, match);
+    const sources = this.collectSources(settlements, match, entities);
     for (const src of sources) {
       this.stampSource(src);
     }
@@ -107,10 +123,12 @@ export class InfluenceMap {
     return this.byFaction[factionId][i] ?? 0;
   }
 
-  /**
-   * Fraction of claimed cells owned / contested for AI strategic analysis.
-   * Wilderness cells are ignored in the denominator.
-   */
+  public getMilitaryPressureAt(worldX: number, worldY: number, factionId: FactionId): number {
+    const i = this.indexAt(worldX, worldY);
+    if (i < 0) return 0;
+    return this.militaryPressure[factionId][i] ?? 0;
+  }
+
   public estimateControlShares(factionId: FactionId): {
     ownShare: number;
     contestedShare: number;
@@ -176,7 +194,6 @@ export class InfluenceMap {
         if (code === 1) {
           ctx.fillStyle = 'rgba(210, 180, 60, 0.28)';
           ctx.fill();
-          // Light hatch for contested
           ctx.strokeStyle = 'rgba(255, 220, 80, 0.35)';
           ctx.lineWidth = 1;
           ctx.beginPath();
@@ -197,12 +214,15 @@ export class InfluenceMap {
     this.drawBorders(ctx, camera, minCx, maxCx, minCy, maxCy);
   }
 
-  private collectSources(settlements: Settlement[], match: MatchState): InfluenceSource[] {
+  private collectSources(
+    settlements: Settlement[],
+    match: MatchState,
+    entities: Entity[],
+  ): InfluenceSource[] {
     const out: InfluenceSource[] = [];
     for (const s of settlements) {
       const player = match.getPlayer(s.playerId);
       if (!player || player.isDefeated) continue;
-      // Destroyed / no town center → no projection (borders retract)
       if (!s.hasTownCenter) continue;
       if (s.population <= 0 && s.structureCount <= 0) continue;
 
@@ -211,18 +231,26 @@ export class InfluenceMap {
         s.houseCount * 1.4 +
         s.farmCount * 1.1 +
         s.storageCount * 1.6 +
+        s.outpostCount * 2.2 +
         s.structureCount * 0.7;
 
       const prestige = s.influence;
       const d = doctrineOf(player.factionId);
-      const strength =
+      const isCapital = player.capitalSettlementId === s.id;
+      let strength =
         s.population * 2.8 +
         s.prosperity * 50 +
         s.safety * 42 +
         infrastructure * 3.5 * d.craftProsperityBias +
         prestige * 55 +
         s.militaryTradition * 28 * d.influenceMilitaryWeight;
-      const range = 220 + strength * 2.2 + s.expansionRadius * 0.35 * d.expansionPressure;
+      // Population scale: denser cities radiate farther soft control.
+      strength *= 0.85 + Math.min(0.45, s.population / 80);
+      if (isCapital) strength *= CAPITAL_INFLUENCE_STRENGTH_MUL;
+      // Soft dominance: city control weighs a bit more in contested scoring.
+      if (match.dominancePhase) strength *= 1.12;
+      let range = 220 + strength * 2.2 + s.expansionRadius * 0.35 * d.expansionPressure;
+      if (isCapital) range *= 1.08;
       if (strength < 4) continue;
       out.push({
         x: s.centerX,
@@ -232,6 +260,37 @@ export class InfluenceMap {
         range,
       });
     }
+
+    for (const e of entities) {
+      if (!(e instanceof Building) || e.isDead || !e.isConstructed) continue;
+      if (!isOutpostBuilding(e.buildingType)) continue;
+      const player = match.getPlayer(e.ownerPlayerId ?? '');
+      if (!player || player.isDefeated) continue;
+      const isFort = e.buildingType === 'Fort';
+      out.push({
+        x: e.x,
+        y: e.y,
+        factionId: player.factionId,
+        strength: isFort ? 55 : 28,
+        range: isFort ? 260 : 170,
+      });
+    }
+
+    for (const e of entities) {
+      if (!(e instanceof Unit) || e.isDead || !e.ownerPlayerId) continue;
+      if (!isCombatUnitType(e.unitType)) continue;
+      const player = match.getPlayer(e.ownerPlayerId);
+      if (!player || player.isDefeated) continue;
+      out.push({
+        x: e.x,
+        y: e.y,
+        factionId: player.factionId,
+        strength: 14,
+        range: 95,
+        temporary: true,
+      });
+    }
+
     return out;
   }
 
@@ -240,7 +299,9 @@ export class InfluenceMap {
     const rCells = Math.ceil(r / CELL) + 1;
     const cx0 = Math.floor(src.x / CELL);
     const cy0 = Math.floor(src.y / CELL);
-    const field = this.byFaction[src.factionId];
+    const field = src.temporary
+      ? this.militaryPressure[src.factionId]
+      : this.byFaction[src.factionId];
 
     for (let cy = cy0 - rCells; cy <= cy0 + rCells; cy++) {
       if (cy < 0 || cy >= this.rows) continue;
@@ -251,10 +312,13 @@ export class InfluenceMap {
         const d = Math.hypot(wx - src.x, wy - src.y);
         if (d >= r) continue;
         const t = 1 - d / r;
-        // Smooth falloff — borders move as strength/range change
         const contrib = src.strength * t * t;
         const i = cy * this.cols + cx;
         field[i] = (field[i] ?? 0) + contrib;
+        if (src.temporary) {
+          this.byFaction[src.factionId][i] =
+            (this.byFaction[src.factionId][i] ?? 0) + contrib * 0.55;
+        }
       }
     }
   }
@@ -280,8 +344,12 @@ export class InfluenceMap {
         this.control[i] = 0;
         continue;
       }
+
+      const permBest = best - (this.militaryPressure[bestId][i] ?? 0) * 0.55;
       const ratio = second > 0 ? second / best : 0;
       if (ratio >= CONTEST_RATIO || best - second < CONTEST_ABS_GAP) {
+        this.control[i] = 1;
+      } else if (permBest < MIN_CLAIM * 0.85 && (this.militaryPressure[bestId][i] ?? 0) > 8) {
         this.control[i] = 1;
       } else {
         this.control[i] = bestId === 'humans' ? 2 : 3;
@@ -289,7 +357,6 @@ export class InfluenceMap {
     }
   }
 
-  /** Outline where adjacent cells differ in control. */
   private drawBorders(
     ctx: CanvasRenderingContext2D,
     camera: Camera,
@@ -309,7 +376,6 @@ export class InfluenceMap {
 
         const wx = cx * CELL;
         const wy = cy * CELL;
-        // Right edge
         if (cx < this.cols - 1 && this.control[i + 1]! !== c) {
           const a = camera.worldToScreen(wx + CELL, wy);
           const b = camera.worldToScreen(wx + CELL, wy + CELL);
@@ -318,7 +384,6 @@ export class InfluenceMap {
           ctx.lineTo(b.x, b.y);
           ctx.stroke();
         }
-        // Bottom edge
         if (cy < this.rows - 1 && this.control[i + this.cols]! !== c) {
           const a = camera.worldToScreen(wx, wy + CELL);
           const b = camera.worldToScreen(wx + CELL, wy + CELL);
