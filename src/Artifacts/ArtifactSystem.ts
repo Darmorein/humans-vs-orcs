@@ -17,8 +17,16 @@ import {
   type ArtifactType,
 } from './Types';
 import { WorldHistory } from '../WorldHistory/WorldHistory';
+import type { GameRng } from '../Sim/GameRng';
 
 let nextArtifactSeq = 1;
+
+export function getNextArtifactSeq(): number {
+  return nextArtifactSeq;
+}
+export function setNextArtifactSeq(n: number) {
+  nextArtifactSeq = Math.max(1, Math.floor(n));
+}
 
 /** Seconds → chronicle year (aligned with slow civic aging). */
 const YEAR_SCALE = 40;
@@ -49,6 +57,19 @@ export class ArtifactSystem {
     return this.all().filter((a) => !a.lost && a.currentOwnerId === playerId);
   }
 
+  /** Replace all artifacts from a save snapshot. */
+  public replaceAll(artifacts: Artifact[]) {
+    this.artifacts.clear();
+    this.forgeCooldown.clear();
+    for (const a of artifacts) {
+      this.artifacts.set(a.id, {
+        ...a,
+        effects: a.effects.map((fx) => ({ ...fx })),
+        history: a.history.map((e) => ({ ...e })),
+      });
+    }
+  }
+
   public getForUnit(unitId: number): Artifact | undefined {
     return this.all().find((a) => !a.lost && a.boundUnitId === unitId);
   }
@@ -59,6 +80,7 @@ export class ArtifactSystem {
     settlements: SettlementSystem,
     match: MatchState,
     heroes: HeroSystem,
+    rng: GameRng,
   ) {
     this.elapsed += dt;
     this.forgeTimer += dt;
@@ -73,7 +95,7 @@ export class ArtifactSystem {
 
     if (this.forgeTimer >= this.forgeInterval) {
       this.forgeTimer = 0;
-      this.tryForgeFromWorld(entities, settlements, match, heroes);
+      this.tryForgeFromWorld(entities, settlements, match, heroes, rng);
     }
   }
 
@@ -191,6 +213,7 @@ export class ArtifactSystem {
     settlements: SettlementSystem,
     match: MatchState,
     heroes: HeroSystem,
+    rng: GameRng,
   ) {
     for (const s of settlements.all()) {
       if (!s.hasTownCenter) continue;
@@ -199,11 +222,11 @@ export class ArtifactSystem {
       if (!player || player.isDefeated) continue;
       if (this.forPlayer(player.id).length >= MAX_ARTIFACTS_PER_PLAYER) continue;
 
-      const recipe = this.evaluateForgeRecipe(s, entities, heroes, player.factionId);
+      const recipe = this.evaluateForgeRecipe(s, entities, heroes, player.factionId, rng);
       if (!recipe) continue;
 
       // Chance scales with how strongly conditions are met — not flat loot RNG.
-      if (Math.random() > recipe.chance) continue;
+      if (!rng.chance(recipe.chance)) continue;
 
       const costIron = recipe.ironCost;
       if (s.iron < costIron) continue;
@@ -211,7 +234,7 @@ export class ArtifactSystem {
 
       const art = this.createArtifact(recipe, s, player.factionId);
       this.artifacts.set(art.id, art);
-      this.forgeCooldown.set(s.id, 90 + Math.random() * 40);
+      this.forgeCooldown.set(s.id, 90 + rng.next() * 40);
       WorldHistory.active?.noteArtifactCreated(
         art.name,
         artifactQualityLabel(art.quality),
@@ -238,6 +261,7 @@ export class ArtifactSystem {
     entities: Entity[],
     heroes: HeroSystem,
     factionId: 'humans' | 'orcs',
+    rng: GameRng,
   ): ForgeRecipe | null {
     const hasSmithBuilding = entities.some(
       (e) =>
@@ -268,8 +292,8 @@ export class ArtifactSystem {
         (s.prosperity - 0.48) * 1.0 +
         Math.min(0.25, (s.iron - 40) / 80) +
         smithHero.prestige / 400;
-      const quality = this.rollQuality(strength + s.craftsmanship * 0.3);
-      const type = this.pickCraftedType(factionId, s);
+      const quality = this.rollQuality(strength + s.craftsmanship * 0.3, rng);
+      const type = this.pickCraftedType(factionId, s, rng);
       return {
         type,
         quality,
@@ -296,7 +320,7 @@ export class ArtifactSystem {
       const strength = (s.faith - 0.55) + priest.prestige / 350;
       return {
         type: 'relic',
-        quality: this.rollQuality(strength + 0.35),
+        quality: this.rollQuality(strength + 0.35, rng),
         creatorId: priest.id,
         chance: Math.min(0.28, 0.06 + strength * 0.4),
         ironCost: 8,
@@ -319,7 +343,7 @@ export class ArtifactSystem {
     ) {
       return {
         type: 'banner',
-        quality: this.rollQuality(s.militaryTradition * 0.5 + warHero.prestige / 300),
+        quality: this.rollQuality(s.militaryTradition * 0.5 + warHero.prestige / 300, rng),
         creatorId: warHero.id,
         chance: Math.min(0.22, 0.05 + s.militaryTradition * 0.2),
         ironCost: 10,
@@ -333,19 +357,20 @@ export class ArtifactSystem {
   private pickCraftedType(
     factionId: 'humans' | 'orcs',
     s: Settlement,
+    rng: GameRng,
   ): ArtifactType {
     if (s.militaryTradition > s.craftsmanship) {
-      return Math.random() < 0.45 ? 'armor' : 'blade';
+      return rng.chance(0.45) ? 'armor' : 'blade';
     }
-    if (factionId === 'orcs' && Math.random() < 0.35) return 'blade';
-    if (Math.random() < 0.3) return 'tool';
-    if (Math.random() < 0.35) return 'bow';
-    return Math.random() < 0.5 ? 'blade' : 'armor';
+    if (factionId === 'orcs' && rng.chance(0.35)) return 'blade';
+    if (rng.chance(0.3)) return 'tool';
+    if (rng.chance(0.35)) return 'bow';
+    return rng.chance(0.5) ? 'blade' : 'armor';
   }
 
-  private rollQuality(strength: number): ArtifactQuality {
-    if (strength > 0.85 && Math.random() < 0.22) return 'legendary';
-    if (strength > 0.45 && Math.random() < 0.45) return 'masterwork';
+  private rollQuality(strength: number, rng: GameRng): ArtifactQuality {
+    if (strength > 0.85 && rng.chance(0.22)) return 'legendary';
+    if (strength > 0.45 && rng.chance(0.45)) return 'masterwork';
     return 'fine';
   }
 

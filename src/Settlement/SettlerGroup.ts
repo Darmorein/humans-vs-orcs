@@ -19,6 +19,13 @@ export interface SettlerGroup {
 
 let nextGroupId = 1;
 
+export function getNextSettlerGroupId(): number {
+  return nextGroupId;
+}
+export function setNextSettlerGroupId(n: number) {
+  nextGroupId = Math.max(1, Math.floor(n));
+}
+
 export function createSettlerGroupId(): string {
   return `sg-${nextGroupId++}`;
 }

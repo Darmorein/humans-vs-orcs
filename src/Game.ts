@@ -21,6 +21,10 @@ import { LocalPlayerController } from './Players/LocalPlayerController';
 import { AIPlayerController } from './Players/AIPlayerController';
 import { RemotePlayerController } from './Players/RemotePlayerController';
 import type { FactionId } from './Players/Types';
+import {
+  applyCapitalDefeatFlags,
+  resolveLocalMatchOutcome,
+} from './Players/FactionDefeatState';
 import { SettlementSystem } from './Settlement/SettlementSystem';
 import { populationSim, PopulationSim } from './Settlement/Population/PopulationSim';
 import { TIER_DEFS } from './Settlement/SettlementTier';
@@ -33,22 +37,29 @@ import type { WorldEvent } from './WorldHistory';
 import {
   CommandQueue,
   GameRng,
+  ReplayPlayer,
   ReplayRecorder,
   SIM_TICK_DT,
   applyCommand,
   buildSaveGame,
   clearPendingLoadSlot,
+  compareSaveLoadHashes,
   downloadJson,
+  hashGameSnapshot,
   hydrateFromSnapshot,
   markPendingLoad,
+  mountSimDiagnostics,
   readSaveFromStorage,
   serializeGameState,
   writeSaveToStorage,
   DEFAULT_SAVE_SLOT,
+  type DeterminismTestResult,
   type GameCommand,
   type GameStateSnapshot,
+  type ReplayManifest,
   type SaveGame,
 } from './Sim';
+import { spawnUnitNearBuilding, spawnUnitRegistered } from './Sim/spawnUnit';
 import { PVP_COMMAND_DELAY_TICKS, type PvpSession } from './Net';
 
 /** Boot options for skirmish or synchronized PvP 1v1. */
@@ -56,6 +67,8 @@ export interface GameOptions {
   seed?: number;
   /** Skirmish: local faction (opponent = other, AI). */
   localFaction?: FactionId;
+  /** Both seats AI (determinism smoke / spectator). */
+  bothAi?: boolean;
   /** PvP: both factions + local seat; creates REMOTE opponent. */
   pvp?: {
     factions: [FactionId, FactionId];
@@ -98,6 +111,8 @@ export class Game {
   private readonly simRng: GameRng;
   /** Applied player commands for future replay (seed + this log). */
   private readonly replayRecorder = new ReplayRecorder();
+  /** Dev replay: inject recorded commands; live controllers paused while active. */
+  private readonly replayPlayer = new ReplayPlayer();
   /** Monotonic simulation tick (fixed step). */
   private simTick = 0;
 
@@ -107,6 +122,10 @@ export class Game {
   private pvpSession: PvpSession | null = null;
   private pvpUnsubs: Array<() => void> = [];
   private pvpModeLabel: string | null = null;
+  private lastStateHash = '—';
+  private pvpRemoteHash: string | null = null;
+  private pvpLastCompareTick: number | null = null;
+  private static readonly PVP_HASH_INTERVAL = 90;
 
   constructor(options?: number | GameOptions) {
     const opts: GameOptions =
@@ -148,6 +167,8 @@ export class Game {
     } else {
       this.match = createDefaultMatch({
         localFaction: opts.localFaction ?? 'humans',
+        localController: opts.bothAi ? 'AI' : 'LOCAL',
+        opponentController: 'AI',
       });
     }
     this.controllers = this.buildControllers(this.match);
@@ -213,15 +234,62 @@ export class Game {
 
   public start() {
     this.loop.start();
+    mountSimDiagnostics(() => this.collectDiagnostics());
+  }
+
+  /** Current gameplay hash (dev / PvP desync). */
+  public computeStateHash(): string {
+    return hashGameSnapshot(this.exportStateSnapshot());
   }
 
   /**
-   * Local UI / selection enqueue intents. Does not mutate the world immediately.
-   * In PvP, also relays to the peer with a short delay buffer.
+   * Save/load determinism smoke: run n ticks, snapshot, run m more → hashA;
+   * reload snapshot, run m → hashB.
+   */
+  public runSaveLoadDeterminismTest(n = 120, m = 120): DeterminismTestResult {
+    const wasPlaying = this.gameState;
+    this.gameState = 'playing';
+    for (let i = 0; i < n; i++) this.debugSimTick();
+    const mid = this.exportStateSnapshot();
+    const save = buildSaveGame({
+      seed: this.seed,
+      simTick: this.simTick,
+      snapshot: mid,
+      replayCommands: this.replayRecorder.getCommands(),
+    });
+    for (let i = 0; i < m; i++) this.debugSimTick();
+    const afterContinue = this.exportStateSnapshot();
+    this.applySave(save);
+    for (let i = 0; i < m; i++) this.debugSimTick();
+    const afterReload = this.exportStateSnapshot();
+    this.gameState = wasPlaying;
+    const result = compareSaveLoadHashes(this.seed, n, m, afterContinue, afterReload);
+    console.info('[Determinism]', result);
+    return result;
+  }
+
+  /** Advance one sim tick without frame/input (tests). */
+  public debugSimTick() {
+    this.onSimTick(SIM_TICK_DT);
+  }
+
+  /**
+   * Local UI / selection enqueue intents.
+   * AI uses enqueueCommand via GameContext (any seat it controls).
    */
   public submitCommand(cmd: GameCommand): void {
     if (this.gameState !== 'playing') return;
     if (cmd.playerId !== this.match.localPlayerId) return;
+    this.enqueueCommand(cmd);
+  }
+
+  /**
+   * Simulation command ingress for LOCAL UI, AI seats, and internal systems.
+   * PvP relays only local-seat orders.
+   */
+  public enqueueCommand(cmd: GameCommand): void {
+    if (this.gameState !== 'playing') return;
+    if (!this.match.getPlayer(cmd.playerId)) return;
 
     const delay = this.pvpSession ? PVP_COMMAND_DELAY_TICKS : 0;
     const stamped: GameCommand = {
@@ -229,7 +297,7 @@ export class Game {
       issuedAtTick: this.simTick + delay,
     };
     this.commandQueue.enqueue(stamped);
-    if (this.pvpSession) {
+    if (this.pvpSession && cmd.playerId === this.match.localPlayerId) {
       this.pvpSession.sendCommand(stamped);
     }
   }
@@ -268,6 +336,10 @@ export class Game {
       entities: this.entities,
       settlements: this.settlementSystem,
       pendingCommands: this.commandQueue.snapshotPending(),
+      squads: this.squadSystem,
+      heroes: this.heroSystem,
+      artifacts: this.artifactSystem,
+      history: this.worldHistory,
     });
   }
 
@@ -324,6 +396,9 @@ export class Game {
       match: this.match,
       settlements: this.settlementSystem,
       squads: this.squadSystem,
+      heroes: this.heroSystem,
+      artifacts: this.artifactSystem,
+      history: this.worldHistory,
       rng: this.simRng,
       setSimTick: (t) => {
         this.simTick = t;
@@ -352,6 +427,26 @@ export class Game {
   public exportReplay(): void {
     const manifest = this.replayRecorder.toManifest(this.seed);
     downloadJson(`hvo-replay-seed${this.seed}-t${this.simTick}.json`, manifest);
+  }
+
+  /**
+   * Development replay: same seed + ReplayManifest commands.
+   * Call on a fresh match with matching seed; skips live AI/local while active.
+   */
+  public beginDevReplay(manifest: ReplayManifest): boolean {
+    if (manifest.seed !== this.seed) {
+      console.warn('[Replay] seed mismatch', manifest.seed, this.seed);
+      return false;
+    }
+    this.replayPlayer.load(manifest);
+    console.info(
+      `[Replay] active cmds=${manifest.commands.length} endTick=${manifest.endTick}`,
+    );
+    return true;
+  }
+
+  public stopDevReplay(): void {
+    this.replayPlayer.stop();
   }
 
   /** Placement preview only — world change happens via GameCommand on confirm. */
@@ -388,13 +483,13 @@ export class Game {
     return !!g && g.status === 'ready';
   }
 
-  public queueStrategic(type: BuildingType, at?: { x: number; y: number }) {
+  public queueStrategic(type: BuildingType, at: { x: number; y: number }) {
     this.submitCommand({
       type: 'queueBuilding',
       playerId: this.match.localPlayerId,
       buildingType: type,
-      x: at?.x,
-      y: at?.y,
+      x: at.x,
+      y: at.y,
     });
   }
 
@@ -415,7 +510,7 @@ export class Game {
     });
   }
 
-  public trainUnit(building: Building, type: string, cost: number) {
+  public trainUnit(building: Building, type: string, cost?: number) {
     this.submitCommand({
       type: 'trainUnit',
       playerId: this.match.localPlayerId,
@@ -443,8 +538,8 @@ export class Game {
   }
 
   private baseForPlayer(player: PlayerState): { x: number; y: number } {
-    // Seat → fair start slot (map labels are historical; not tied to faction look).
-    return player.id === 'player-1' ? this.gameMap.humanBase : this.gameMap.orcBase;
+    // Seat → fair start slot (SW/NE), not faction look.
+    return player.id === 'player-1' ? this.gameMap.startA : this.gameMap.startB;
   }
 
   private seatIndex(player: PlayerState): 0 | 1 {
@@ -460,37 +555,41 @@ export class Game {
       this.entities.push(new Building(base.x, base.y, faction.mainBuilding, player));
 
       const workerCount = player.controllerType === 'AI' ? 4 : 3;
+      // Main building radius is 50; canOccupy blocks ~49.4 — keep all workers clear.
+      // Old seat-1 offsets (-50/-22/+6, y+30) put workers 1–2 inside the footprint.
+      const side = seat === 0 ? 1 : -1;
       for (let i = 0; i < workerCount; i++) {
-        const ox = seat === 0 ? 40 + i * 28 : -50 + i * 28;
-        this.entities.push(
-          new Unit(base.x + ox, base.y + 30, player, {
-            hp: 40,
-            speed: 70,
-            unitType: faction.workerType,
-            damage: 3,
-            range: 25,
-          }),
-        );
+        const ox = side * (60 + i * 28);
+        const oy = 40;
+        spawnUnitRegistered({
+          player,
+          unitType: faction.workerType,
+          x: base.x + ox,
+          y: base.y + oy,
+          entities: this.entities,
+          squads: this.squadSystem,
+        });
       }
 
       if (player.controllerType === 'AI') {
-        const grunt = new Unit(base.x + 55, base.y + 40, player, {
-          hp: 130,
-          speed: 52,
+        spawnUnitNearBuilding({
+          player,
           unitType: faction.meleeType,
-          damage: 18,
-          range: 28,
+          buildingX: base.x,
+          buildingY: base.y,
+          entities: this.entities,
+          squads: this.squadSystem,
+          rng: this.simRng,
         });
-        const ranged = new Unit(base.x + 80, base.y + 20, player, {
-          hp: 80,
-          speed: 56,
+        spawnUnitNearBuilding({
+          player,
           unitType: faction.rangedType,
-          damage: 11,
-          range: 120,
+          buildingX: base.x,
+          buildingY: base.y,
+          entities: this.entities,
+          squads: this.squadSystem,
+          rng: this.simRng,
         });
-        this.entities.push(grunt, ranged);
-        this.squadSystem.registerUnit(grunt);
-        this.squadSystem.registerUnit(ranged);
       }
     }
 
@@ -569,11 +668,52 @@ export class Game {
         this.gameState = 'victory';
       }),
     );
+    this.pvpUnsubs.push(
+      this.pvpSession.onRemoteHash((tick, hash) => {
+        this.pvpRemoteHash = hash;
+        this.pvpLastCompareTick = tick;
+        if (tick === this.simTick || Math.abs(tick - this.simTick) <= 2) {
+          const local = this.computeStateHash();
+          this.lastStateHash = local;
+          if (local !== hash) {
+            console.error(
+              `[DESYNC DETECTED] tick~${tick} local=${local} remote=${hash} simTick=${this.simTick}`,
+            );
+          }
+        }
+      }),
+    );
     const mode = document.getElementById('pvp-mode-label');
     if (mode && this.pvpModeLabel) {
       mode.hidden = false;
       mode.textContent = this.pvpModeLabel;
     }
+  }
+
+  private maybeSendPvpHash() {
+    if (!this.pvpSession) return;
+    if (this.simTick % Game.PVP_HASH_INTERVAL !== 0) return;
+    const hash = this.computeStateHash();
+    this.lastStateHash = hash;
+    this.pvpSession.sendHashSync(this.simTick, hash);
+  }
+
+  private collectDiagnostics() {
+    const units = this.entities.filter((e) => e instanceof Unit && !e.isDead).length;
+    return {
+      simTick: this.simTick,
+      seed: this.seed,
+      rngState: this.simRng.getState(),
+      entityCount: this.entities.filter((e) => !e.isDead).length,
+      unitCount: units,
+      settlementCount: this.settlementSystem.all().length,
+      commandQueueLength: this.commandQueue.length,
+      lastStateHash: this.lastStateHash === '—' ? this.computeStateHash() : this.lastStateHash,
+      determinismStatus: this.pvpSession ? 'pvp-hash' : 'skirmish',
+      pvpLocalHash: this.pvpSession ? this.lastStateHash : undefined,
+      pvpRemoteHash: this.pvpRemoteHash ?? undefined,
+      pvpLastCompareTick: this.pvpLastCompareTick ?? undefined,
+    };
   }
 
   private processCommandQueue() {
@@ -585,17 +725,8 @@ export class Game {
       settlements: this.settlementSystem,
       squads: this.squadSystem,
       rng: this.simRng,
-      canBuildAt: (x: number, y: number) =>
-        canPlaceBuildingAt(
-          x,
-          y,
-          this.gameMap,
-          this.entities,
-          this.placementMode && this.placementMode !== 'foundSettlement'
-            ? footprintForBuildingType(this.placementMode, this.match.localPlayer.factionId)
-            : 40,
-        ),
-      unitOptions: (type: string) => this.unitOptions(type),
+      gameMap: this.gameMap,
+      artifacts: this.artifactSystem,
     };
     for (const cmd of batch) {
       applyCommand(cmd, world);
@@ -667,20 +798,32 @@ export class Game {
     if (this.gameState !== 'playing') return;
 
     this.simTick += 1;
+
+    if (this.replayPlayer.isActive()) {
+      for (const cmd of this.replayPlayer.commandsForTick(this.simTick)) {
+        this.commandQueue.enqueue({ ...cmd, issuedAtTick: this.simTick });
+      }
+    }
+
     this.processCommandQueue();
+    this.maybeSendPvpHash();
 
     const local = this.match.localPlayer;
-    const ctx = {
-      dt,
-      entities: this.entities,
-      gameMap: this.gameMap,
-      match: this.match,
-      settlements: this.settlementSystem,
-      squads: this.squadSystem,
-      influence: this.influenceMap,
-    };
-    for (const controller of this.controllers) {
-      controller.update(ctx);
+    if (!this.replayPlayer.isActive()) {
+      const ctx = {
+        dt,
+        entities: this.entities,
+        gameMap: this.gameMap,
+        match: this.match,
+        settlements: this.settlementSystem,
+        squads: this.squadSystem,
+        influence: this.influenceMap,
+        submitCommand: (cmd: GameCommand) => this.enqueueCommand(cmd),
+        rng: this.simRng,
+      };
+      for (const controller of this.controllers) {
+        controller.update(ctx);
+      }
     }
 
     const aliveMains = new Set<string>();
@@ -698,13 +841,14 @@ export class Game {
       }
     }
 
-    this.settlementSystem.update(dt, this.entities, this.match, this.gameMap);
+    this.settlementSystem.update(dt, this.entities, this.match, this.gameMap, this.simRng);
     this.influenceMap.update(dt, this.settlementSystem.all(), this.match);
     this.squadSystem.update(dt, {
       entities: this.entities,
       gameMap: this.gameMap,
       influence: this.influenceMap,
       match: this.match,
+      rng: this.simRng,
     });
     this.heroSystem.update(dt, this.entities, this.settlementSystem, this.match);
     this.artifactSystem.update(
@@ -713,20 +857,16 @@ export class Game {
       this.settlementSystem,
       this.match,
       this.heroSystem,
+      this.simRng,
     );
     this.worldHistory.update(dt, this.settlementSystem, this.influenceMap, this.match, {
       x: this.gameMap.width * 0.5,
       y: this.gameMap.height * 0.5,
     });
 
-    for (const player of this.match.allPlayers()) {
-      if (!aliveMains.has(player.id)) player.isDefeated = true;
-    }
-
-    if (local.isDefeated) this.gameState = 'defeat';
-    else if (this.match.opponentsOf(local.id).every((p) => p.isDefeated)) {
-      this.gameState = 'victory';
-    }
+    applyCapitalDefeatFlags(this.match.allPlayers(), aliveMains);
+    const outcome = resolveLocalMatchOutcome(local, this.match.opponentsOf(local.id));
+    if (outcome !== 'playing') this.gameState = outcome;
 
     this.resolveUnitCollisions();
 
@@ -747,49 +887,51 @@ export class Game {
       const e1 = this.entities[i]!;
       if (!(e1 instanceof Unit) || e1.isDead) continue;
 
+      // Unit–unit: only j > i so each pair is processed once.
       for (let j = i + 1; j < this.entities.length; j++) {
         const e2 = this.entities[j]!;
-        if (e2.isDead) continue;
+        if (!(e2 instanceof Unit) || e2.isDead) continue;
 
         const dx = e1.x - e2.x;
         const dy = e1.y - e2.y;
         const distSq = dx * dx + dy * dy;
+        const minDist = (e1.radius + e2.radius) * 0.88;
+        if (distSq >= minDist * minDist || distSq <= 0) continue;
+        const dist = Math.sqrt(distSq);
+        const overlap = minDist - dist;
+        const nx = dx / dist;
+        const ny = dy / dist;
+        this.trySlideUnit(e1, nx * overlap * 0.5, ny * overlap * 0.5);
+        this.trySlideUnit(e2, -nx * overlap * 0.5, -ny * overlap * 0.5);
+      }
 
-        if (e2 instanceof Unit) {
-          const minDist = (e1.radius + e2.radius) * 0.88;
-          if (distSq >= minDist * minDist || distSq <= 0) continue;
-          const dist = Math.sqrt(distSq);
-          const overlap = minDist - dist;
-          const nx = dx / dist;
-          const ny = dy / dist;
-          this.trySlideUnit(e1, nx * overlap * 0.5, ny * overlap * 0.5);
-          this.trySlideUnit(e2, -nx * overlap * 0.5, -ny * overlap * 0.5);
-          continue;
+      // Buildings are often spawned before units — must check all, not only j > i.
+      for (const e2 of this.entities) {
+        if (!(e2 instanceof Building) || e2.isDead) continue;
+        if (e1.buildTarget === e2) continue;
+        const dx = e1.x - e2.x;
+        const dy = e1.y - e2.y;
+        const distSq = dx * dx + dy * dy;
+        const minDist = e1.radius * 0.55 + e2.radius * 0.92;
+        if (distSq >= minDist * minDist) continue;
+        const dist = Math.sqrt(distSq);
+        const ang = dist > 0.01 ? Math.atan2(dy, dx) : (e1.id % 16) * 0.4;
+        const target = minDist + 2;
+        let placed = false;
+        for (let k = 0; k < 8; k++) {
+          const a = ang + (k * Math.PI) / 4;
+          const tx = e2.x + Math.cos(a) * target;
+          const ty = e2.y + Math.sin(a) * target;
+          if (this.gameMap.isWalkable(tx, ty) && !this.hitsBuildingSolid(e1, tx, ty, e2)) {
+            e1.x = tx;
+            e1.y = ty;
+            placed = true;
+            break;
+          }
         }
-
-        if (e2 instanceof Building) {
-          if (e1.buildTarget === e2) continue;
-          const minDist = e1.radius * 0.55 + e2.radius * 0.92;
-          if (distSq >= minDist * minDist) continue;
-          const dist = Math.sqrt(distSq);
-          const ang = dist > 0.01 ? Math.atan2(dy, dx) : (e1.id % 16) * 0.4;
-          const target = minDist + 2;
-          let placed = false;
-          for (let k = 0; k < 8; k++) {
-            const a = ang + (k * Math.PI) / 4;
-            const tx = e2.x + Math.cos(a) * target;
-            const ty = e2.y + Math.sin(a) * target;
-            if (this.gameMap.isWalkable(tx, ty) && !this.hitsBuildingSolid(e1, tx, ty, e2)) {
-              e1.x = tx;
-              e1.y = ty;
-              placed = true;
-              break;
-            }
-          }
-          if (!placed && dist > 0.01) {
-            e1.x = e2.x + (dx / dist) * target;
-            e1.y = e2.y + (dy / dist) * target;
-          }
+        if (!placed && dist > 0.01) {
+          e1.x = e2.x + (dx / dist) * target;
+          e1.y = e2.y + (dy / dist) * target;
         }
       }
     }
@@ -1049,7 +1191,13 @@ export class Game {
       (e): e is Unit => e instanceof Unit && !e.isDead,
     );
     if (!unit || unit.ownerPlayerId !== this.match.localPlayerId) return false;
-    return this.artifactSystem.transferToUnit(artifactId, unit);
+    this.submitCommand({
+      type: 'equipArtifact',
+      playerId: this.match.localPlayerId,
+      artifactId,
+      unitId: unit.id,
+    });
+    return true;
   }
 
   public unequipSelectedArtifact(): boolean {
@@ -1057,7 +1205,11 @@ export class Game {
       (e): e is Unit => e instanceof Unit && !e.isDead && !!e.artifactId,
     );
     if (!unit || unit.ownerPlayerId !== this.match.localPlayerId) return false;
-    this.artifactSystem.unequipFromUnit(unit, this.settlementSystem);
+    this.submitCommand({
+      type: 'unequipArtifact',
+      playerId: this.match.localPlayerId,
+      unitId: unit.id,
+    });
     return true;
   }
 

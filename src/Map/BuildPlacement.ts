@@ -19,7 +19,6 @@ export function canPlaceBuildingAt(
 ): boolean {
   if (!gameMap.canBuildAt(x, y)) return false;
 
-  // Sample ring so large footprints don't sit half on water/rock.
   const samples = 6;
   for (let i = 0; i < samples; i++) {
     const a = (i / samples) * Math.PI * 2;
@@ -40,7 +39,10 @@ export function canPlaceBuildingAt(
   return true;
 }
 
-/** Manifest-driven clearance radius for a building type (world units). */
+/**
+ * Manifest-driven clearance radius for a building type (world units).
+ * Shared by placement preview and simulation validation.
+ */
 export function footprintForBuildingType(type: string, factionId: string = 'humans'): number {
   const meta = buildingAssetMeta(type as BuildingType, factionId);
   if (meta) {

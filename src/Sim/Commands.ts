@@ -2,8 +2,8 @@ import type { BuildingType } from '../Entities/Building';
 import type { SquadFormation } from '../Combat/FormationDefs';
 
 /**
- * Player-intent commands — serializable for future lockstep / replay.
- * UI and local input enqueue these; simulation applies them on a fixed tick.
+ * Player-intent commands — serializable for lockstep / replay / PvP.
+ * UI and AI enqueue these; simulation applies them on a fixed tick.
  */
 export type GameCommand =
   | MoveSquadCommand
@@ -18,12 +18,15 @@ export type GameCommand =
   | AssistBuildCommand
   | CancelConstructionCommand
   | ReorderConstructionCommand
-  | SurrenderCommand;
+  | SurrenderCommand
+  | EquipArtifactCommand
+  | UnequipArtifactCommand
+  | TransferArtifactCommand;
 
 interface CommandBase {
   /** Issuing seat — unambiguous Player ID. */
   playerId: string;
-  /** Optional client/sim tick hint for future networking. */
+  /** Optional client/sim tick hint for networking. */
   issuedAtTick?: number;
 }
 
@@ -36,9 +39,7 @@ export interface MoveSquadCommand extends CommandBase {
 
 export interface AttackCommand extends CommandBase {
   type: 'attack';
-  /** Squad attack (preferred for combat). */
   squadId?: string;
-  /** Micro / worker attack. */
   unitIds?: number[];
   targetEntityId: number;
 }
@@ -52,15 +53,15 @@ export interface ChangeFormationCommand extends CommandBase {
 export interface QueueBuildingCommand extends CommandBase {
   type: 'queueBuilding';
   buildingType: BuildingType;
-  x?: number;
-  y?: number;
+  /** Required world position — footprint validated from ConstructionCatalog. */
+  x: number;
+  y: number;
 }
 
 export interface FoundSettlementCommand extends CommandBase {
   type: 'foundSettlement';
   x: number;
   y: number;
-  /** If no ready settler group, attempt to form one first. */
   formGroupIfNeeded?: boolean;
 }
 
@@ -72,10 +73,10 @@ export interface TrainUnitCommand extends CommandBase {
   type: 'trainUnit';
   buildingId: number;
   unitType: string;
-  cost: number;
+  /** Ignored at apply — cost comes from UnitCatalog + doctrine. Kept for log compat. */
+  cost?: number;
 }
 
-/** Non-squad agents (workers / Ctrl-micro). */
 export interface MoveAgentsCommand extends CommandBase {
   type: 'moveAgents';
   unitIds: number[];
@@ -108,6 +109,24 @@ export interface ReorderConstructionCommand extends CommandBase {
 
 export interface SurrenderCommand extends CommandBase {
   type: 'surrender';
+}
+
+export interface EquipArtifactCommand extends CommandBase {
+  type: 'equipArtifact';
+  artifactId: string;
+  unitId: number;
+}
+
+export interface UnequipArtifactCommand extends CommandBase {
+  type: 'unequipArtifact';
+  unitId: number;
+}
+
+export interface TransferArtifactCommand extends CommandBase {
+  type: 'transferArtifact';
+  artifactId: string;
+  /** Target unit; omit / null to vault (unequip to settlement vault). */
+  unitId: number | null;
 }
 
 export function isGameCommand(v: unknown): v is GameCommand {

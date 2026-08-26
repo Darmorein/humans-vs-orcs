@@ -21,6 +21,13 @@ export interface ConstructionProject {
 
 let nextProjectId = 1;
 
+export function getNextProjectId(): number {
+  return nextProjectId;
+}
+export function setNextProjectId(n: number) {
+  nextProjectId = Math.max(1, Math.floor(n));
+}
+
 /**
  * Ordered construction queue for one settlement.
  * Player may enqueue strategic projects, reorder, and cancel.
@@ -117,6 +124,14 @@ export class ConstructionQueue {
       (p) =>
         p.target === target && (p.status === 'queued' || p.status === 'building'),
     );
+  }
+
+  /** Replace queue contents from a save snapshot. */
+  public replaceAll(projects: ConstructionProject[]) {
+    this.items = projects.map((p) => ({
+      ...p,
+      roadTiles: p.roadTiles.map((t) => ({ ...t })),
+    }));
   }
 
   private prune() {

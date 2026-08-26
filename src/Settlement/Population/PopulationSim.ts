@@ -11,6 +11,13 @@ import {
 
 let nextCitizenId = 1;
 
+export function getNextCitizenId(): number {
+  return nextCitizenId;
+}
+export function setNextCitizenId(n: number) {
+  nextCitizenId = Math.max(1, Math.floor(n));
+}
+
 const FOOD_PER_CITIZEN = 0.45;
 const MAX_AGE = 70;
 const TICK = 1.0; // accumulate to ~1s steps for light sim

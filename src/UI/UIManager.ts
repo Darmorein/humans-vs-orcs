@@ -17,6 +17,7 @@ import { isCombatUnitType } from '../Combat/Squad';
 import { ALL_FORMATIONS, formationLabel } from '../Combat/FormationDefs';
 import { heroTypeLabel } from '../Heroes';
 import { artifactQualityLabel, artifactTypeLabel } from '../Artifacts';
+import { getUnitDef } from '../Sim/UnitCatalog';
 import { Game } from '../Game';
 
 export class UIManager {
@@ -237,8 +238,9 @@ export class UIManager {
     if (entity instanceof Building && isMainBuilding(entity.buildingType)) {
       if (!entity.isConstructed) return;
 
-      this.createButton(`Train ${faction.workerType} (50G)`, gold >= 50, () =>
-        this.game.trainUnit(entity, faction.workerType, 50),
+      const workerCost = getUnitDef(faction.workerType)?.goldCost ?? 50;
+      this.createButton(`Train ${faction.workerType} (${workerCost}G)`, gold >= workerCost, () =>
+        this.game.trainUnit(entity, faction.workerType),
       );
 
       for (const recipe of strategicOptionsForFaction(local.factionId, settlement?.tier)) {
@@ -280,11 +282,13 @@ export class UIManager {
       this.renderQueueControls(settlement);
     } else if (entity instanceof Building && entity.buildingType === faction.productionBuilding) {
       if (!entity.isConstructed) return;
-      this.createButton(`Train ${faction.meleeType} (80G)`, gold >= 80, () =>
-        this.game.trainUnit(entity, faction.meleeType, 80),
+      const meleeCost = getUnitDef(faction.meleeType)?.goldCost ?? 80;
+      const rangedCost = getUnitDef(faction.rangedType)?.goldCost ?? 100;
+      this.createButton(`Train ${faction.meleeType} (${meleeCost}G)`, gold >= meleeCost, () =>
+        this.game.trainUnit(entity, faction.meleeType),
       );
-      this.createButton(`Train ${faction.rangedType} (100G)`, gold >= 100, () =>
-        this.game.trainUnit(entity, faction.rangedType, 100),
+      this.createButton(`Train ${faction.rangedType} (${rangedCost}G)`, gold >= rangedCost, () =>
+        this.game.trainUnit(entity, faction.rangedType),
       );
     }
   }

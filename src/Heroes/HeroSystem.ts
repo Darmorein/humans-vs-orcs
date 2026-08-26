@@ -18,6 +18,13 @@ import { WorldHistory } from '../WorldHistory/WorldHistory';
 
 let nextHeroSeq = 1;
 
+export function getNextHeroSeq(): number {
+  return nextHeroSeq;
+}
+export function setNextHeroSeq(n: number) {
+  nextHeroSeq = Math.max(1, Math.floor(n));
+}
+
 const COMBAT_TRAITS: AgentTrait[] = [
   'brave',
   'hardy',
@@ -60,6 +67,18 @@ export class HeroSystem {
 
   public heroesForPlayer(playerId: string): Hero[] {
     return this.all().filter((h) => h.ownerPlayerId === playerId && h.alive);
+  }
+
+  /** Replace all heroes from a save snapshot. */
+  public replaceAll(heroes: Hero[]) {
+    this.heroes.clear();
+    for (const h of heroes) {
+      this.heroes.set(h.id, {
+        ...h,
+        traits: [...h.traits],
+        history: h.history.map((e) => ({ ...e })),
+      });
+    }
   }
 
   public update(

@@ -35,13 +35,27 @@ import {
   type SettlerGroup,
 } from './SettlerGroup';
 import { doctrineOf } from '../Players/FactionDoctrine';
-import { pickLayoutForFaction } from './LayoutVariants';
+import {
+  pickLayoutForFaction,
+  pickLayoutForId,
+  SETTLEMENT_LAYOUTS,
+  type SettlementLayoutId,
+} from './LayoutVariants';
 import type { FactionId } from '../Players/Types';
+import type { GameRng } from '../Sim/GameRng';
+import type { Citizen } from './Population/Types';
 
 const WOOD_PASSIVE = 0.25;
 const STONE_PASSIVE = 0.1;
 
 let nextSettlementSeq = 1;
+
+export function getNextSettlementSeq(): number {
+  return nextSettlementSeq;
+}
+export function setNextSettlementSeq(n: number) {
+  nextSettlementSeq = Math.max(1, Math.floor(n));
+}
 
 /**
  * Settlement simulation: needs → queue → builds; multi-seat per player;
@@ -55,6 +69,8 @@ export class SettlementSystem {
 
   private settlements = new Map<string, Settlement>();
   private settlerGroups: SettlerGroup[] = [];
+  /** Active only during `update` — road rolls / settler scatter. */
+  private tickRng: GameRng | null = null;
 
   public ensure(playerId: string, factionId: FactionId = 'humans'): Settlement {
     const existing = this.primaryFor(playerId);
@@ -81,7 +97,7 @@ export class SettlementSystem {
 
   /**
    * Replace settlement seats from a snapshot (Save/Load).
-   * Citizens are lightly re-seeded to match population — not bit-identical.
+   * Uses snap citizens/queue when present; otherwise lightly re-seeds population.
    */
   public hydrateFromSnapshot(
     rows: Array<{
@@ -98,6 +114,10 @@ export class SettlementSystem {
       stone: number;
       iron: number;
       hasTownCenter: boolean;
+      citizens?: Citizen[];
+      queue?: ConstructionProject[];
+      expansionRadius?: number;
+      layoutId?: string;
     }>,
     match?: MatchState,
   ) {
@@ -108,7 +128,11 @@ export class SettlementSystem {
       const m = /-(\d+)$/.exec(row.id);
       if (m) maxSeq = Math.max(maxSeq, Number(m[1]) + 1);
       const tier = (row.tier as SettlementTier) || 'village';
-      const s = new Settlement(row.id, row.playerId, tier);
+      const layout =
+        row.layoutId && row.layoutId in SETTLEMENT_LAYOUTS
+          ? SETTLEMENT_LAYOUTS[row.layoutId as SettlementLayoutId]
+          : pickLayoutForId(row.id);
+      const s = new Settlement(row.id, row.playerId, tier, layout);
       s.centerX = row.centerX;
       s.centerY = row.centerY;
       s.housing = row.housing;
@@ -118,13 +142,31 @@ export class SettlementSystem {
       s.stone = row.stone;
       s.iron = row.iron;
       s.hasTownCenter = row.hasTownCenter;
-      s.citizens = [];
-      const factionId = match?.getPlayer(row.playerId)?.factionId ?? 'humans';
-      if (row.population > 0) {
-        populationSim.seedIfEmpty(s, factionId, Math.max(1, row.population));
-        while (s.citizens.length > row.population) s.citizens.pop();
+      if (typeof row.expansionRadius === 'number') {
+        s.expansionRadius = row.expansionRadius;
       }
-      s.population = s.citizens.length;
+
+      if (row.citizens) {
+        s.citizens = row.citizens.map((c) => ({
+          ...c,
+          traits: [...c.traits],
+          heroId: c.heroId ?? null,
+        }));
+        s.population = s.citizens.length;
+      } else {
+        s.citizens = [];
+        const factionId = match?.getPlayer(row.playerId)?.factionId ?? 'humans';
+        if (row.population > 0) {
+          populationSim.seedIfEmpty(s, factionId, Math.max(1, row.population));
+          while (s.citizens.length > row.population) s.citizens.pop();
+        }
+        s.population = s.citizens.length;
+      }
+
+      if (row.queue) {
+        s.queue.replaceAll(row.queue);
+      }
+
       this.settlements.set(s.id, s);
     }
     nextSettlementSeq = Math.max(nextSettlementSeq, maxSeq);
@@ -138,7 +180,14 @@ export class SettlementSystem {
     );
   }
 
-  public update(dt: number, entities: Entity[], match: MatchState, gameMap: GameMap) {
+  public update(
+    dt: number,
+    entities: Entity[],
+    match: MatchState,
+    gameMap: GameMap,
+    rng: GameRng,
+  ) {
+    this.tickRng = rng;
     this.reconcileMains(entities, match);
 
     for (const s of this.all()) {
@@ -172,6 +221,7 @@ export class SettlementSystem {
     populationSim.update(dt, active, (id) => match.getPlayer(id)?.factionId ?? 'humans');
 
     this.updateSettlerMissions(entities, match);
+    this.tickRng = null;
   }
 
   public enqueueStrategic(
@@ -620,7 +670,7 @@ export class SettlementSystem {
         !s.queue.hasQueuedOrBuilding('Road') &&
         s.stone >= 15 &&
         isBuildingAllowed(s.tier, 'Road') &&
-        (roadChance >= 1 || Math.random() < roadChance * 0.35)
+        (roadChance >= 1 || (this.tickRng?.chance(roadChance * 0.35) ?? false))
       ) {
         s.queue.enqueue('Road', 'autonomous');
       }
@@ -989,7 +1039,8 @@ export class SettlementSystem {
 
       for (const u of settlers) {
         u.settlerGroupId = null;
-        u.moveCommand(group.targetX + (Math.random() - 0.5) * 40, group.targetY + 30);
+        const jitter = this.tickRng ? this.tickRng.range(-20, 20) : 0;
+        u.moveCommand(group.targetX + jitter, group.targetY + 30);
       }
 
       group.status = 'complete';

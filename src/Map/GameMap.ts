@@ -3,9 +3,11 @@ import type { AssetKey } from '../Assets/AssetPaths';
 import { Camera } from '../Engine/Camera';
 import { drawIsoRock, drawIsoTree } from '../Engine/Iso';
 import type { GeneratedMap } from './MapGenerator';
-import { findPath, type PathPoint } from './Pathfinding';
+import { findPath, markBuildingBlockedTiles, type PathPoint } from './Pathfinding';
 import { terrainColor, isBuildableTerrain, assertTerrainDefinitionsComplete, type TerrainTile, type TerrainType } from './Terrain';
 import { MAP_CONFIG } from './MapConfig';
+import type { Entity } from '../Entities/Entity';
+import { Building } from '../Entities/Building';
 
 export type MapDecoration = {
   x: number;
@@ -23,10 +25,14 @@ export class GameMap {
   public tiles: TerrainTile[];
   public decorations: MapDecoration[] = [];
   public seed: number;
-  public humanBase: { x: number; y: number };
-  public orcBase: { x: number; y: number };
+  /** Seat start slot A (SW-ish) — not faction. */
+  public startA: { x: number; y: number };
+  /** Seat start slot B (NE-ish) — not faction. */
+  public startB: { x: number; y: number };
   public goldDeposits: { x: number; y: number }[];
   public validation: GeneratedMap['validation'];
+  /** Scratch buffer for building footprints in pathfinding. */
+  private pathBlockedScratch: Uint8Array | null = null;
 
   constructor(generated: GeneratedMap) {
     this.seed = generated.seed;
@@ -36,8 +42,8 @@ export class GameMap {
     this.tiles = generated.tiles;
     this.width = generated.worldWidth;
     this.height = generated.worldHeight;
-    this.humanBase = generated.humanBase;
-    this.orcBase = generated.orcBase;
+    this.startA = generated.startA;
+    this.startB = generated.startB;
     this.goldDeposits = generated.goldDeposits;
     this.validation = generated.validation;
     this.buildDecorations();
@@ -70,8 +76,36 @@ export class GameMap {
     return 1 / tile.movementCost;
   }
 
-  public findPath(sx: number, sy: number, gx: number, gy: number): PathPoint[] {
-    return findPath(this.tiles, this.tileWidth, this.tileHeight, this.tileSize, sx, sy, gx, gy);
+  /**
+   * Terrain A* with optional building footprints blocked.
+   * Pass `ignoreBuilding` so builders can path onto their construction site.
+   */
+  public findPath(
+    sx: number,
+    sy: number,
+    gx: number,
+    gy: number,
+    entities?: Entity[],
+    ignoreBuilding?: Building | null,
+  ): PathPoint[] {
+    let blocked: Uint8Array | null = null;
+    if (entities && entities.length > 0) {
+      const size = this.tileWidth * this.tileHeight;
+      if (!this.pathBlockedScratch || this.pathBlockedScratch.length !== size) {
+        this.pathBlockedScratch = new Uint8Array(size);
+      }
+      blocked = this.pathBlockedScratch;
+      const solids: Array<{ x: number; y: number; radius: number }> = [];
+      for (const e of entities) {
+        if (!(e instanceof Building) || e.isDead) continue;
+        if (ignoreBuilding && e === ignoreBuilding) continue;
+        solids.push({ x: e.x, y: e.y, radius: e.radius });
+      }
+      markBuildingBlockedTiles(blocked, this.tileWidth, this.tileHeight, this.tileSize, solids);
+    }
+    return findPath(this.tiles, this.tileWidth, this.tileHeight, this.tileSize, sx, sy, gx, gy, {
+      blocked,
+    });
   }
 
   /** World-space centers of bridge clusters (choke points). */
