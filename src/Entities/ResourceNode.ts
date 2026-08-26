@@ -29,7 +29,7 @@ export class ResourceNode extends Entity {
   public lastExtractionRate = 0;
 
   constructor(x: number, y: number, amount: number) {
-    super(x, y, 20, 10000, 'neutral', null);
+    super(x, y, 28, 10000, 'neutral', null);
     this.resourceAmount = amount;
     this.remainingAmount = amount;
   }
@@ -49,29 +49,49 @@ export class ResourceNode extends Entity {
     const screenPos = camera.worldToScreen(this.x, this.y);
     const sprite = assets.get('terrain/gold-deposit');
 
-    drawIsoEllipse(ctx, screenPos.x, screenPos.y, this.radius + 6, 'rgba(0, 0, 0, 0.25)');
+    // Bright ground ring so deposits read on dirt/grass tiles.
+    drawIsoEllipse(ctx, screenPos.x, screenPos.y, this.radius + 14, 'rgba(255, 193, 7, 0.35)');
+    drawIsoEllipse(ctx, screenPos.x, screenPos.y, this.radius + 6, 'rgba(0, 0, 0, 0.3)');
 
     if (sprite) {
-      drawSprite(ctx, sprite, screenPos.x, screenPos.y, 0.32, { pivotY: 0.82 });
+      drawSprite(ctx, sprite, screenPos.x, screenPos.y, 0.55, { pivotY: 0.82 });
     } else {
-      drawIsoDiamond(ctx, screenPos.x, screenPos.y, this.radius + 2, '#6D4C41', '#4E342E');
-      drawIsoBox(ctx, screenPos.x, screenPos.y - 2, this.radius * 0.55, 16, {
+      drawIsoDiamond(ctx, screenPos.x, screenPos.y, this.radius + 6, '#6D4C41', '#4E342E');
+      drawIsoBox(ctx, screenPos.x, screenPos.y - 4, this.radius * 0.7, 22, {
         top: '#FFD54F',
         left: '#F9A825',
         right: '#FFC107',
       });
     }
 
-    if (this.selected || this.raidDamageCooldown > 0) {
-      const barW = 28;
-      const pct = Math.max(0, this.remainingAmount / Math.max(1, this.maxHp > 0 ? 5000 : 5000));
-      // Use initial stock proxy via resourceAmount cap stored at spawn (~5000 typical).
-      const stock = Math.min(1, this.remainingAmount / 5000);
-      ctx.fillStyle = '#333';
-      ctx.fillRect(screenPos.x - barW / 2, screenPos.y + 14, barW, 4);
-      ctx.fillStyle = this.raidDamageCooldown > 0 ? '#E53935' : '#FFD54F';
-      ctx.fillRect(screenPos.x - barW / 2, screenPos.y + 14, barW * stock, 4);
-      void pct;
+    const stock = Math.min(1, this.remainingAmount / 5000);
+    const barW = 36;
+    ctx.fillStyle = '#222';
+    ctx.fillRect(screenPos.x - barW / 2, screenPos.y + 16, barW, 5);
+    ctx.fillStyle = this.raidDamageCooldown > 0 ? '#E53935' : '#FFD54F';
+    ctx.fillRect(screenPos.x - barW / 2, screenPos.y + 16, barW * stock, 5);
+
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 11px Segoe UI, sans-serif';
+    ctx.fillStyle = '#FFF8E1';
+    ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+    ctx.lineWidth = 3;
+    const title = this.selected ? 'GOLD DEPOSIT' : 'GOLD';
+    ctx.strokeText(title, screenPos.x, screenPos.y - 28);
+    ctx.fillText(title, screenPos.x, screenPos.y - 28);
+
+    ctx.font = '10px Segoe UI, sans-serif';
+    if (this.lastExtractionRate > 0.05) {
+      const rate = `+${this.lastExtractionRate.toFixed(1)}/s`;
+      ctx.fillStyle = '#FFE082';
+      ctx.strokeText(rate, screenPos.x, screenPos.y - 16);
+      ctx.fillText(rate, screenPos.x, screenPos.y - 16);
+    } else if (this.linkedSettlementId) {
+      ctx.fillStyle = 'rgba(255, 224, 130, 0.75)';
+      ctx.fillText('linked · idle', screenPos.x, screenPos.y - 16);
+    } else {
+      ctx.fillStyle = 'rgba(200, 200, 200, 0.7)';
+      ctx.fillText('unclaimed', screenPos.x, screenPos.y - 16);
     }
   }
 }

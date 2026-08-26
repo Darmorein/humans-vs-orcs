@@ -258,6 +258,12 @@ export class GameMap {
             ctx.ellipse(screen.x, screen.y, tileW * 0.35, tileW * 0.18, 0, 0, Math.PI * 2);
             ctx.fill();
           }
+          if (tile.type === 'gold') {
+            ctx.fillStyle = 'rgba(255, 193, 7, 0.42)';
+            ctx.beginPath();
+            ctx.ellipse(screen.x, screen.y, tileW * 0.38, tileW * 0.2, 0, 0, Math.PI * 2);
+            ctx.fill();
+          }
         } else {
           this.drawFallbackTile(ctx, camera, tx, ty, tile);
         }

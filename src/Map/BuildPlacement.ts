@@ -5,6 +5,7 @@ import { ResourceNode } from '../Entities/ResourceNode';
 import { buildingAssetMeta } from '../Assets/SpriteMap';
 import { ASSET_PRODUCTION_STANDARDS } from '../Assets/Manifest';
 import type { GameMap } from './GameMap';
+import { isBuildableTerrain } from './Terrain';
 
 /**
  * Terrain + footprint clearance for placing a building.
@@ -17,26 +18,47 @@ export function canPlaceBuildingAt(
   entities: readonly Entity[],
   footprintRadius = 36,
 ): boolean {
-  if (!gameMap.canBuildAt(x, y)) return false;
+  return placementBlockReason(x, y, gameMap, entities, footprintRadius) === null;
+}
+
+/** Human-readable reason a site is blocked, or null if valid. */
+export function placementBlockReason(
+  x: number,
+  y: number,
+  gameMap: GameMap,
+  entities: readonly Entity[],
+  footprintRadius = 36,
+): string | null {
+  const center = gameMap.getTileAt(x, y);
+  if (!isBuildableTerrain(center.type)) {
+    return `Bad terrain (${center.type})`;
+  }
 
   const samples = 6;
   for (let i = 0; i < samples; i++) {
     const a = (i / samples) * Math.PI * 2;
     const sx = x + Math.cos(a) * footprintRadius * 0.65;
     const sy = y + Math.sin(a) * footprintRadius * 0.65;
-    if (!gameMap.canBuildAt(sx, sy)) return false;
+    const t = gameMap.getTileAt(sx, sy);
+    if (!isBuildableTerrain(t.type)) {
+      return `Footprint hits ${t.type}`;
+    }
   }
 
   for (const e of entities) {
     if (e.isDead) continue;
     if (e instanceof Building) {
       const minSep = footprintRadius + e.radius * 0.9;
-      if (Math.hypot(e.x - x, e.y - y) < minSep) return false;
+      if (Math.hypot(e.x - x, e.y - y) < minSep) {
+        return `Too close to ${e.buildingType}`;
+      }
     } else if (e instanceof ResourceNode) {
-      if (Math.hypot(e.x - x, e.y - y) < footprintRadius + e.radius + 8) return false;
+      if (Math.hypot(e.x - x, e.y - y) < footprintRadius + e.radius + 8) {
+        return 'Too close to gold deposit';
+      }
     }
   }
-  return true;
+  return null;
 }
 
 /**

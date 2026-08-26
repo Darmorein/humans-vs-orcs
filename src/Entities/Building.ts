@@ -159,6 +159,16 @@ export class Building extends Entity {
       ctx.fillRect(screenPos.x - this.width / 2, barY, this.width, 5);
       ctx.fillStyle = '#0ff';
       ctx.fillRect(screenPos.x - this.width / 2, barY, this.width * buildPercent, 5);
+      if (this.buildingType === 'Outpost' || this.buildingType === 'Fort') {
+        ctx.font = 'bold 11px Segoe UI, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#B3E5FC';
+        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+        ctx.lineWidth = 3;
+        const label = `${this.buildingType} ${Math.floor(buildPercent * 100)}%`;
+        ctx.strokeText(label, screenPos.x, barY - 6);
+        ctx.fillText(label, screenPos.x, barY - 6);
+      }
     } else {
       const hpPercent = Math.max(0, this.hp / this.maxHp);
       if (hpPercent < 1 || this.selected) {
