@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "validate:assets": "node scripts/validate-asset-manifest.mjs",
+    "build": "npm run validate:assets && tsc && vite build",
     "preview": "vite preview",
     "pvp": "node server/pvp-relay.mjs"
   },

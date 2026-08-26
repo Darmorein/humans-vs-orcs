@@ -1,5 +1,33 @@
-import type { AssetEntryInput, AssetManifestV2 } from './Types';
+import type { AssetEntryInput, AssetManifestV2, AssetProductionStandards } from './Types';
 import { ASSET_MANIFEST_VERSION } from './Types';
+
+export const ASSET_PRODUCTION_STANDARDS: AssetProductionStandards = {
+  space: {
+    projection: 'isometric-2:1',
+    sourceTileWidth: 128,
+    sourceTileHeight: 64,
+    worldUnitsPerTile: 28,
+    unitReferenceHeight: 24,
+  },
+  animation: {
+    directions: ['NE', 'SE', 'SW', 'NW'],
+    coreStates: ['idle', 'walk', 'attack', 'hit', 'death'],
+    civilianStates: ['gather', 'carry-resource', 'build'],
+    rangedStates: ['attack-anticipation', 'projectile-release'],
+    casterStates: ['cast', 'channel'],
+  },
+  atlas: {
+    padding: 2,
+    spacing: 2,
+    powerOfTwo: true,
+    maxSize: 4096,
+  },
+  teamColor: {
+    requiredForFactionAssets: true,
+    channel: 'red',
+    mode: 'replace',
+  },
+};
 
 /** Shorthand for authoring; omitted fields get category defaults. */
 function a(entry: AssetEntryInput): AssetEntryInput {
@@ -12,6 +40,7 @@ function a(entry: AssetEntryInput): AssetEntryInput {
  */
 export const ASSET_MANIFEST_V2: AssetManifestV2 = {
   version: ASSET_MANIFEST_VERSION,
+  standards: ASSET_PRODUCTION_STANDARDS,
   assets: [
     // —— Humans buildings ——
     a({
@@ -22,6 +51,7 @@ export const ASSET_MANIFEST_V2: AssetManifestV2 = {
       role: 'main',
       worldScale: 0.3,
       footprint: { width: 100, height: 100 },
+      footprintTiles: { columns: 4, rows: 4 },
       collisionFootprint: { width: 90, height: 90 },
       selectionRadius: 56,
       blocksMovement: true,
@@ -36,6 +66,7 @@ export const ASSET_MANIFEST_V2: AssetManifestV2 = {
       role: 'production',
       worldScale: 0.26,
       footprint: { width: 80, height: 80 },
+      footprintTiles: { columns: 3, rows: 2 },
       collisionFootprint: { width: 72, height: 72 },
       selectionRadius: 48,
       tags: ['building', 'production', 'humans'],
@@ -48,6 +79,7 @@ export const ASSET_MANIFEST_V2: AssetManifestV2 = {
       role: 'economy',
       worldScale: 0.22,
       footprint: { width: 60, height: 60 },
+      footprintTiles: { columns: 2, rows: 2 },
       collisionFootprint: { width: 54, height: 54 },
       selectionRadius: 36,
       tags: ['building', 'economy', 'humans'],
@@ -60,6 +92,7 @@ export const ASSET_MANIFEST_V2: AssetManifestV2 = {
       role: 'defense',
       worldScale: 0.24,
       footprint: { width: 50, height: 50 },
+      footprintTiles: { columns: 1, rows: 1 },
       collisionFootprint: { width: 44, height: 44 },
       selectionRadius: 32,
       tags: ['building', 'defense', 'humans', 'unused-in-gameplay'],
@@ -113,6 +146,7 @@ export const ASSET_MANIFEST_V2: AssetManifestV2 = {
       role: 'main',
       worldScale: 0.26,
       footprint: { width: 100, height: 100 },
+      footprintTiles: { columns: 4, rows: 4 },
       collisionFootprint: { width: 90, height: 90 },
       selectionRadius: 56,
       tags: ['building', 'main', 'orcs'],
@@ -125,6 +159,7 @@ export const ASSET_MANIFEST_V2: AssetManifestV2 = {
       role: 'production',
       worldScale: 0.24,
       footprint: { width: 80, height: 80 },
+      footprintTiles: { columns: 3, rows: 2 },
       collisionFootprint: { width: 72, height: 72 },
       selectionRadius: 48,
       tags: ['building', 'production', 'orcs'],
@@ -137,6 +172,7 @@ export const ASSET_MANIFEST_V2: AssetManifestV2 = {
       role: 'economy',
       worldScale: 0.2,
       footprint: { width: 60, height: 60 },
+      footprintTiles: { columns: 2, rows: 2 },
       collisionFootprint: { width: 54, height: 54 },
       selectionRadius: 36,
       tags: ['building', 'economy', 'orcs'],
@@ -149,6 +185,7 @@ export const ASSET_MANIFEST_V2: AssetManifestV2 = {
       role: 'defense',
       worldScale: 0.24,
       footprint: { width: 50, height: 50 },
+      footprintTiles: { columns: 1, rows: 1 },
       collisionFootprint: { width: 44, height: 44 },
       selectionRadius: 32,
       tags: ['building', 'defense', 'orcs', 'unused-in-gameplay'],
@@ -377,6 +414,7 @@ export const ASSET_MANIFEST_V2: AssetManifestV2 = {
       src: '/assets/terrain/gold-deposit.png',
       role: 'gold',
       worldScale: 0.32,
+      footprintTiles: { columns: 2, rows: 2 },
       pivotY: 0.82,
       selectionRadius: 28,
       blocksMovement: true,
