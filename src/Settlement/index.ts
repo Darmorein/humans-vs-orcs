@@ -58,5 +58,9 @@ export {
   SETTLER_WORKERS,
   SETTLER_GOLD_COST,
   SETTLER_MIN_PARENT_POP,
+  SETTLER_CARAVAN_SPEED,
   type SettlerGroup,
 } from './SettlerGroup';
+export { civilianVisualAgents, CivilianVisualAgents } from './CivilianVisualAgents';
+export type { SettlementIncomeSources } from './Settlement';
+export { emptyIncomeSources } from './Settlement';

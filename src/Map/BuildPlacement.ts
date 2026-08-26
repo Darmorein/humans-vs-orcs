@@ -56,6 +56,7 @@ export function footprintForBuildingType(type: string, factionId: string = 'huma
   }
 
   if (type === 'TownHall' || type === 'OrcStronghold' || type === 'Fort') return 48;
+  if (type === 'Outpost') return 32;
   if (type === 'Barracks' || type === 'OrcBarracks') return 40;
   if (type === 'House' || type === 'Wall') return 28;
   if (type === 'Farm' || type === 'PigFarm') return 32;

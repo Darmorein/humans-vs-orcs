@@ -5,6 +5,25 @@ import type { Citizen } from './Population/Types';
 import { TIER_DEFS, type SettlementTier } from './SettlementTier';
 import type { SettlementFocus, SettlementSpecialization } from './SettlementFocus';
 
+/** Named income channels for settlement dashboard / AI. */
+export interface SettlementIncomeSources {
+  goldMines: number;
+  goldPassive: number;
+  foodFarms: number;
+  woodPassive: number;
+  stonePassive: number;
+}
+
+export function emptyIncomeSources(): SettlementIncomeSources {
+  return {
+    goldMines: 0,
+    goldPassive: 0,
+    foodFarms: 0,
+    woodPassive: 0,
+    stonePassive: 0,
+  };
+}
+
 /**
  * Autonomous settlement seat owned by one Player (a player may own several).
  * Construction goes through ConstructionQueue; citizens are a light pop sim.
@@ -81,7 +100,16 @@ export class Settlement {
   public houseCount = 0;
   public farmCount = 0;
   public storageCount = 0;
+  public outpostCount = 0;
+  public mineCount = 0;
   public hasTownCenter = false;
+
+  /** Aggregate civic builders available for autonomous/strategic construction. */
+  public civicLabor = 0;
+  /** Per-tick resource income breakdown for UI (gold/food/wood/stone). */
+  public incomeSources: SettlementIncomeSources = emptyIncomeSources();
+  /** Last-tick rates (per second) for dashboard. */
+  public incomeRates = { gold: 0, food: 0, wood: 0, stone: 0 };
 
   public buildCooldown = 0;
   public placementSalt = 0;

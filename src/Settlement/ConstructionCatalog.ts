@@ -21,7 +21,7 @@ export interface ConstructionRecipe {
   category: ConstructionCategory;
   label: string;
   costs: ConstructionCosts;
-  /** Minimum idle builders required to start. */
+  /** Minimum civic builder labor to start (population profession pool). */
   buildersRequired: number;
   /** Population must be at least this (0 = no gate). */
   minPopulation: number;
@@ -40,6 +40,7 @@ function recipe(
 
 export function defaultFootprint(target: ConstructionTarget): number {
   if (target === 'TownHall' || target === 'OrcStronghold' || target === 'Fort') return 48;
+  if (target === 'Outpost') return 32;
   if (target === 'Barracks' || target === 'OrcBarracks') return 40;
   if (target === 'House' || target === 'Wall') return 28;
   if (target === 'Farm' || target === 'PigFarm') return 32;
@@ -124,6 +125,14 @@ const STRATEGIC: ConstructionRecipe[] = [
     costs: { gold: 120, wood: 20, stone: 80, iron: 15 },
     buildersRequired: 2,
     minPopulation: 6,
+  }),
+  recipe({
+    target: 'Outpost',
+    category: 'strategic',
+    label: 'Outpost',
+    costs: { gold: 60, wood: 25, stone: 40, iron: 5 },
+    buildersRequired: 1,
+    minPopulation: 4,
   }),
   recipe({
     target: 'Temple',

@@ -22,6 +22,7 @@ export type BuildingType =
   | 'PigFarm'
   | 'Blacksmith'
   | 'Fort'
+  | 'Outpost'
   | 'Temple'
   | 'Market'
   | 'Wall';
@@ -73,6 +74,10 @@ export class Building extends Entity {
       hp = 1800;
       radius = 48;
       maxProgress = 220;
+    } else if (type === 'Outpost') {
+      hp = 700;
+      radius = 32;
+      maxProgress = 110;
     } else if (type === 'Temple') {
       hp = 800;
       radius = 38;
@@ -169,6 +174,7 @@ export class Building extends Entity {
     if (this.buildingType === 'TownHall') return 56;
     if (this.buildingType === 'OrcStronghold') return 64;
     if (this.buildingType === 'Fort') return 52;
+    if (this.buildingType === 'Outpost') return 28;
     if (this.buildingType === 'Barracks' || this.buildingType === 'OrcBarracks') return 38;
     if (this.buildingType === 'Blacksmith' || this.buildingType === 'Temple') return 32;
     if (this.buildingType === 'Storage' || this.buildingType === 'Market') return 28;
@@ -188,7 +194,7 @@ export class Building extends Entity {
         ? { top: '#FFCC80', left: '#5D4037', right: '#8D6E63' }
         : { top: '#FFE082', left: '#5D4037', right: '#A1887F' };
     }
-    if (this.buildingType === 'Wall' || this.buildingType === 'Fort') {
+    if (this.buildingType === 'Wall' || this.buildingType === 'Fort' || this.buildingType === 'Outpost') {
       return { top: '#B0BEC5', left: '#455A64', right: '#78909C' };
     }
     if (this.buildingType === 'Temple') {
@@ -226,10 +232,15 @@ export function isStrategicBuilding(type: BuildingType): boolean {
     type === 'OrcBarracks' ||
     type === 'Blacksmith' ||
     type === 'Fort' ||
+    type === 'Outpost' ||
     type === 'Temple' ||
     type === 'Market' ||
     type === 'Wall'
   );
+}
+
+export function isOutpostBuilding(type: BuildingType): boolean {
+  return type === 'Outpost' || type === 'Fort';
 }
 
 export function factionOfBuildingType(type: BuildingType): FactionId {

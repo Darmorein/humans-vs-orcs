@@ -36,6 +36,7 @@ const VILLAGE_BUILDINGS: ConstructionTarget[] = [
   'Barracks',
   'OrcBarracks',
   'Wall',
+  'Outpost',
 ];
 const TOWN_BUILDINGS: ConstructionTarget[] = [
   ...VILLAGE_BUILDINGS,

@@ -1,5 +1,5 @@
 /**
- * Settler Group / founding mission — workers march, then a Camp is founded.
+ * Settler Group / founding mission — caravan travels without player-controlled workers.
  */
 
 export type SettlerGroupStatus = 'ready' | 'traveling' | 'complete' | 'failed';
@@ -10,11 +10,19 @@ export interface SettlerGroup {
   parentSettlementId: string;
   /** Citizens reserved for the new Camp. */
   citizenIds: string[];
-  /** Map worker entity ids escorting the group. */
+  /**
+   * Optional escort / traveler unit ids (non-commandable visual or legacy).
+   * New missions may leave this empty and use caravanX/Y only.
+   */
   unitIds: number[];
   targetX: number | null;
   targetY: number | null;
   status: SettlerGroupStatus;
+  /** Authoritative caravan position while traveling. */
+  caravanX: number;
+  caravanY: number;
+  /** World units per second. */
+  caravanSpeed: number;
 }
 
 let nextGroupId = 1;
@@ -37,3 +45,4 @@ export const SETTLER_WOOD_COST = 40;
 /** Parent must be at least this large (civic pop). */
 export const SETTLER_MIN_PARENT_POP = 12;
 export const FOUNDING_ARRIVAL_DIST = 48;
+export const SETTLER_CARAVAN_SPEED = 42;

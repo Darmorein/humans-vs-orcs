@@ -2,10 +2,12 @@ import {
   Building,
   isHousingBuilding,
   isMainBuilding,
+  isOutpostBuilding,
   isStorageBuilding,
   type BuildingType,
 } from '../Entities/Building';
 import { Entity } from '../Entities/Entity';
+import { ResourceNode } from '../Entities/ResourceNode';
 import { Unit } from '../Entities/Unit';
 import type { GameMap } from '../Map/GameMap';
 import type { InfluenceMap } from '../Map/InfluenceMap';
@@ -20,7 +22,7 @@ import {
   type ConstructionTarget,
 } from './ConstructionCatalog';
 import type { ConstructionProject } from './ConstructionQueue';
-import { Settlement } from './Settlement';
+import { Settlement, emptyIncomeSources } from './Settlement';
 import type { SettlementNeedKind } from './Types';
 import { SettlementPlanner, settlementPlanner } from './SettlementPlanner';
 import { populationSim } from './Population/PopulationSim';
@@ -38,6 +40,7 @@ import {
 import {
   createSettlerGroupId,
   FOUNDING_ARRIVAL_DIST,
+  SETTLER_CARAVAN_SPEED,
   type SettlerGroup,
 } from './SettlerGroup';
 import { doctrineOf } from '../Players/FactionDoctrine';
@@ -53,6 +56,15 @@ import type { Citizen } from './Population/Types';
 
 const WOOD_PASSIVE = 0.25;
 const STONE_PASSIVE = 0.1;
+/** Base gold extraction per second at infra 0 / full safety / owned. */
+const GOLD_BASE_EXTRACTION = 2.2;
+const FOOD_PER_FARM = 1.15;
+const LINK_MINE_RANGE = 520;
+const RAID_RANGE = 90;
+const OUTPOST_COST = { gold: 60, wood: 25, stone: 40, iron: 5 };
+const OUTPOST_MIN_DIST_FROM_TC = 160;
+const OUTPOST_MAX_DIST_FROM_ARMY = 110;
+const OUTPOST_MIN_DIST_BETWEEN = 140;
 
 let nextSettlementSeq = 1;
 
@@ -202,12 +214,14 @@ export class SettlementSystem {
   ) {
     this.tickRng = rng;
     this.reconcileMains(entities, match);
+    this.linkResourceNodes(entities, match, influence);
+    this.processResourceRaids(entities, match);
 
     for (const s of this.all()) {
       const player = match.getPlayer(s.playerId);
       if (!player || player.isDefeated) continue;
       this.syncFromWorld(s, entities, player, influence);
-      this.simulateEconomy(s, dt);
+      this.simulateEconomy(s, dt, entities, player, influence);
       this.recomputeNeeds(s, player.factionId);
       this.deriveCivicStats(s, player.factionId, entities);
       this.refreshTier(s);
@@ -235,7 +249,7 @@ export class SettlementSystem {
     });
     populationSim.update(dt, active, (id) => match.getPlayer(id)?.factionId ?? 'humans');
 
-    this.updateSettlerMissions(entities, match);
+    this.updateSettlerMissions(entities, match, dt);
     this.tickRng = null;
   }
 
@@ -272,7 +286,9 @@ export class SettlementSystem {
     return true;
   }
 
-  /** Reserve citizens + mark idle workers as a Settler Group. */
+  /**
+   * Reserve citizens + materials for a Settler Group (caravan — no map workers).
+   */
   public formSettlerGroup(
     playerId: string,
     entities: Entity[],
@@ -281,19 +297,7 @@ export class SettlementSystem {
     if (!this.canFormSettlerGroup(playerId, factionId)) return null;
     const s = this.primaryFor(playerId)!;
     const d = doctrineOf(factionId);
-    const workerType = FACTIONS[factionId].workerType;
-
-    const workers: Unit[] = [];
-    for (const e of entities) {
-      if (!(e instanceof Unit) || e.isDead || e.ownerPlayerId !== playerId) continue;
-      if (e.unitType !== workerType) continue;
-      if (e.settlerGroupId) continue;
-      if (e.buildTarget || e.gatherTarget) continue;
-      if (Math.hypot(e.x - s.centerX, e.y - s.centerY) > s.expansionRadius * 1.8) continue;
-      workers.push(e);
-      if (workers.length >= d.settlerWorkers) break;
-    }
-    if (workers.length < d.settlerWorkers) return null;
+    void entities;
 
     if (
       !s.spendMaterials({
@@ -312,10 +316,13 @@ export class SettlementSystem {
       ownerPlayerId: playerId,
       parentSettlementId: s.id,
       citizenIds: citizens.map((c) => c.id),
-      unitIds: workers.map((w) => w.id),
+      unitIds: [],
       targetX: null,
       targetY: null,
       status: 'ready',
+      caravanX: s.centerX,
+      caravanY: s.centerY,
+      caravanSpeed: SETTLER_CARAVAN_SPEED,
     };
     this.transitCitizens.set(
       group.id,
@@ -324,7 +331,6 @@ export class SettlementSystem {
         return c;
       }),
     );
-    for (const w of workers) w.settlerGroupId = group.id;
     this.settlerGroups.push(group);
     s.population = s.citizens.length;
     return group;
@@ -332,7 +338,7 @@ export class SettlementSystem {
 
   private transitCitizens = new Map<string, import('./Population/Types').Citizen[]>();
 
-  /** Player order: Found Settlement Here — settlers march to the site. */
+  /** Player order: Found Settlement Here — caravan marches to the site. */
   public orderFoundSettlement(
     playerId: string,
     x: number,
@@ -349,11 +355,113 @@ export class SettlementSystem {
     group.targetX = x;
     group.targetY = y;
     group.status = 'traveling';
+    // Legacy escort units (old saves) still march.
     for (const e of entities) {
       if (!(e instanceof Unit) || e.settlerGroupId !== group.id) continue;
       e.moveCommand(x, y);
     }
     return true;
+  }
+
+  /**
+   * Establish an Outpost near friendly army presence — GameCommands path.
+   * Requires combat units nearby, min distance from TC, not deep in enemy solid control.
+   */
+  public establishOutpost(
+    playerId: string,
+    x: number,
+    y: number,
+    entities: Entity[],
+    match: MatchState,
+    gameMap: GameMap,
+    influence?: InfluenceMap,
+  ): boolean {
+    const player = match.getPlayer(playerId);
+    const s = this.primaryFor(playerId);
+    if (!player || !s || !s.hasTownCenter) return false;
+    if (!isBuildingAllowed(s.tier, 'Outpost')) return false;
+    if (!s.canAfford(OUTPOST_COST)) return false;
+
+    const distTc = Math.hypot(x - s.centerX, y - s.centerY);
+    if (distTc < OUTPOST_MIN_DIST_FROM_TC) return false;
+    if (distTc > s.expansionRadius * 2.8 + 280) return false;
+
+    const faction = FACTIONS[player.factionId];
+    let armyNear = 0;
+    for (const e of entities) {
+      if (!(e instanceof Unit) || e.isDead || e.ownerPlayerId !== playerId) continue;
+      if (e.unitType !== faction.meleeType && e.unitType !== faction.rangedType) continue;
+      if (Math.hypot(e.x - x, e.y - y) <= OUTPOST_MAX_DIST_FROM_ARMY) armyNear += 1;
+    }
+    if (armyNear < 1) return false;
+
+    for (const e of entities) {
+      if (!(e instanceof Building) || e.isDead) continue;
+      if (!isOutpostBuilding(e.buildingType)) continue;
+      if (e.ownerPlayerId !== playerId) continue;
+      if (Math.hypot(e.x - x, e.y - y) < OUTPOST_MIN_DIST_BETWEEN) return false;
+    }
+
+    if (influence) {
+      const ctrl = influence.getControlAt(x, y);
+      if (ctrl !== 'none' && ctrl !== 'contested' && ctrl !== player.factionId) {
+        // Deep enemy solid control — reject
+        const enemyInf = influence.getFactionInfluenceAt(x, y, ctrl);
+        const ownInf = influence.getFactionInfluenceAt(x, y, player.factionId);
+        if (enemyInf > ownInf * 1.6 && enemyInf > 40) return false;
+      }
+    }
+
+    if (!canPlaceBuildingAt(x, y, gameMap, entities, footprintForBuildingType('Outpost', player.factionId))) {
+      return false;
+    }
+    if (!s.spendMaterials(OUTPOST_COST)) return false;
+    player.gold = s.gold;
+
+    const building = new Building(x, y, 'Outpost', player, false);
+    building.settlementId = s.id;
+    entities.push(building);
+    s.buildCooldown = 2;
+    return true;
+  }
+
+  /** Snapshot settler groups for save. */
+  public exportSettlerGroups(): SettlerGroup[] {
+    return this.settlerGroups.map((g) => ({
+      ...g,
+      citizenIds: [...g.citizenIds],
+      unitIds: [...g.unitIds],
+    }));
+  }
+
+  public exportTransitCitizens(): Array<{ groupId: string; citizens: Citizen[] }> {
+    return [...this.transitCitizens.entries()].map(([groupId, citizens]) => ({
+      groupId,
+      citizens: citizens.map((c) => ({ ...c, traits: [...c.traits] })),
+    }));
+  }
+
+  public hydrateSettlerMissions(
+    groups: SettlerGroup[],
+    transit?: Array<{ groupId: string; citizens: Citizen[] }>,
+  ) {
+    this.settlerGroups = groups.map((g) => ({
+      ...g,
+      citizenIds: [...g.citizenIds],
+      unitIds: [...g.unitIds],
+      caravanX: g.caravanX ?? 0,
+      caravanY: g.caravanY ?? 0,
+      caravanSpeed: g.caravanSpeed ?? SETTLER_CARAVAN_SPEED,
+    }));
+    this.transitCitizens.clear();
+    if (transit) {
+      for (const row of transit) {
+        this.transitCitizens.set(
+          row.groupId,
+          row.citizens.map((c) => ({ ...c, traits: [...c.traits] })),
+        );
+      }
+    }
   }
 
   private createSettlement(
@@ -513,6 +621,8 @@ export class SettlementSystem {
     s.houseCount = 0;
     s.farmCount = 0;
     s.storageCount = 0;
+    s.outpostCount = 0;
+    s.mineCount = 0;
     s.structureCount = 0;
     s.hasTownCenter = false;
 
@@ -529,6 +639,8 @@ export class SettlementSystem {
 
       if (e instanceof Unit) {
         if (e.settlerGroupId) continue; // in transit
+        // Economy workers are no longer gameplay units — ignore for pop/army counts.
+        if (e.unitType === faction.workerType) continue;
         s.unitCount += 1;
         if (e.unitType === faction.meleeType || e.unitType === faction.rangedType) {
           militaryWeight += 1;
@@ -553,11 +665,21 @@ export class SettlementSystem {
         if (isStorageBuilding(e.buildingType)) {
           s.storageCount += 1;
         }
+        if (isOutpostBuilding(e.buildingType)) {
+          s.outpostCount += 1;
+        }
       }
+    }
+
+    for (const e of entities) {
+      if (!(e instanceof ResourceNode) || e.isDead) continue;
+      if (e.linkedSettlementId === s.id) s.mineCount += 1;
     }
 
     s.housing += tierDef.housingBonus;
     s.population = s.citizens.length;
+    const byProf = populationSim.countByProfession(s);
+    s.civicLabor = byProf.builder + byProf.craftsman * 0.35 + byProf.peasant * 0.1;
     const cm = tierDef.capacityMult;
     s.capacity = {
       food: Math.floor((80 + s.storageCount * 40) * cm),
@@ -602,9 +724,183 @@ export class SettlementSystem {
     );
   }
 
-  private simulateEconomy(s: Settlement, dt: number) {
-    s.wood = clamp(s.wood + WOOD_PASSIVE * dt, 0, s.capacity.wood);
-    s.stone = clamp(s.stone + STONE_PASSIVE * dt, 0, s.capacity.stone);
+  private simulateEconomy(
+    s: Settlement,
+    dt: number,
+    entities: Entity[],
+    player: PlayerState,
+    influence?: InfluenceMap,
+  ) {
+    const sources = emptyIncomeSources();
+    sources.woodPassive = WOOD_PASSIVE * dt;
+    sources.stonePassive = STONE_PASSIVE * dt;
+    s.wood = clamp(s.wood + sources.woodPassive, 0, s.capacity.wood);
+    s.stone = clamp(s.stone + sources.stonePassive, 0, s.capacity.stone);
+
+    const farmMult =
+      1 +
+      (s.specialization === 'farming' ? 0.2 : 0) +
+      (s.focus === 'growth' ? 0.08 : 0);
+    sources.foodFarms = s.farmCount * FOOD_PER_FARM * farmMult * s.safety * dt;
+    s.food = clamp(s.food + sources.foodFarms, 0, s.capacity.food);
+
+    let goldGain = 0;
+    const by = populationSim.countByProfession(s);
+    const minerBoost = 1 + by.miner * 0.04;
+    const specBoost =
+      s.specialization === 'mining' ? 1.2 : s.specialization === 'trade' ? 1.08 : 1;
+
+    for (const e of entities) {
+      if (!(e instanceof ResourceNode) || e.isDead) continue;
+      if (e.linkedSettlementId !== s.id) continue;
+      if (e.remainingAmount <= 0) {
+        e.lastExtractionRate = 0;
+        continue;
+      }
+
+      const ctrl = influence?.getControlAt(e.x, e.y) ?? 'none';
+      let ownership = 0;
+      if (ctrl === player.factionId) ownership = 1;
+      else if (ctrl === 'contested') ownership = 0.45;
+      else if (ctrl === 'none') {
+        // Linked outpost/settlement still grants weak access
+        ownership = e.controllingFactionId === player.factionId ? 0.7 : 0.35;
+      } else {
+        // Enemy solid control — no income
+        ownership = 0;
+        e.controllingFactionId = ctrl;
+        e.lastExtractionRate = 0;
+        continue;
+      }
+
+      e.controllingFactionId = ownership > 0 ? player.factionId : e.controllingFactionId;
+
+      const infra = 0.55 + Math.min(1.5, e.infrastructureLevel) * 0.45;
+      const access =
+        0.65 +
+        Math.min(
+          0.35,
+          1 - Math.hypot(e.x - s.centerX, e.y - s.centerY) / (LINK_MINE_RANGE + 80),
+        );
+      const raidMul = e.raidDamageCooldown > 0 ? 0.15 : 1;
+      const safety = clamp(e.safety * s.safety, 0.15, 1) * raidMul;
+
+      const rate =
+        GOLD_BASE_EXTRACTION * infra * safety * access * ownership * minerBoost * specBoost;
+      const extracted = Math.min(e.remainingAmount, rate * dt);
+      e.remainingAmount -= extracted;
+      e.resourceAmount = e.remainingAmount;
+      e.lastExtractionRate = rate;
+      // Slow infra growth while extracting safely
+      if (extracted > 0 && e.raidDamageCooldown <= 0) {
+        e.infrastructureLevel = Math.min(3, e.infrastructureLevel + dt * 0.015);
+      }
+      goldGain += extracted;
+    }
+
+    sources.goldMines = goldGain;
+    s.gold += goldGain;
+    s.incomeSources = sources;
+    s.incomeRates = {
+      gold: dt > 0 ? goldGain / dt : 0,
+      food: dt > 0 ? sources.foodFarms / dt : 0,
+      wood: WOOD_PASSIVE,
+      stone: STONE_PASSIVE,
+    };
+  }
+
+  /** Link nearby gold deposits to owned settlements / outposts. */
+  private linkResourceNodes(
+    entities: Entity[],
+    match: MatchState,
+    influence?: InfluenceMap,
+  ) {
+    for (const node of entities) {
+      if (!(node instanceof ResourceNode) || node.isDead) continue;
+
+      let best: Settlement | null = null;
+      let bestScore = -1;
+
+      for (const s of this.all()) {
+        const player = match.getPlayer(s.playerId);
+        if (!player || player.isDefeated || !s.hasTownCenter) continue;
+        const d = Math.hypot(node.x - s.centerX, node.y - s.centerY);
+        if (d > LINK_MINE_RANGE) continue;
+        let score = 1 - d / LINK_MINE_RANGE;
+        score += s.outpostCount * 0.05;
+        if (s.specialization === 'mining') score += 0.1;
+        // Prefer settlements that already own influence
+        if (influence) {
+          const ctrl = influence.getControlAt(node.x, node.y);
+          if (ctrl === player.factionId) score += 0.25;
+          else if (ctrl === 'contested') score += 0.08;
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          best = s;
+        }
+      }
+
+      // Outpost proximity boosts link / infra
+      for (const e of entities) {
+        if (!(e instanceof Building) || e.isDead || !e.isConstructed) continue;
+        if (!isOutpostBuilding(e.buildingType)) continue;
+        const player = match.getPlayer(e.ownerPlayerId ?? '');
+        if (!player) continue;
+        const d = Math.hypot(node.x - e.x, node.y - e.y);
+        if (d > 220) continue;
+        const seat =
+          (e.settlementId ? this.getById(e.settlementId) : null) ??
+          this.nearestSettlement(player.id, e.x, e.y);
+        if (!seat) continue;
+        const score = 0.55 + (1 - d / 220) + (e.buildingType === 'Fort' ? 0.2 : 0.1);
+        if (score > bestScore) {
+          bestScore = score;
+          best = seat;
+        }
+        if (seat.id === node.linkedSettlementId || best === seat) {
+          node.infrastructureLevel = Math.max(
+            node.infrastructureLevel,
+            e.buildingType === 'Fort' ? 2 : 1,
+          );
+        }
+      }
+
+      if (best) {
+        node.linkedSettlementId = best.id;
+        const p = match.getPlayer(best.playerId);
+        if (p) node.controllingFactionId = p.factionId;
+      }
+    }
+  }
+
+  /** Enemy combat near linked deposits → raid damage / safety drop. */
+  private processResourceRaids(entities: Entity[], match: MatchState) {
+    for (const node of entities) {
+      if (!(node instanceof ResourceNode) || node.isDead) continue;
+      if (!node.linkedSettlementId) continue;
+      const seat = this.getById(node.linkedSettlementId);
+      if (!seat) continue;
+      const owner = match.getPlayer(seat.playerId);
+      if (!owner) continue;
+
+      let raiders = 0;
+      for (const e of entities) {
+        if (!(e instanceof Unit) || e.isDead) continue;
+        if (e.ownerPlayerId === seat.playerId) continue;
+        if (!e.ownerPlayerId) continue;
+        const other = match.getPlayer(e.ownerPlayerId);
+        if (!other || other.factionId === owner.factionId) continue;
+        if (Math.hypot(e.x - node.x, e.y - node.y) > RAID_RANGE) continue;
+        const f = FACTIONS[other.factionId];
+        if (e.unitType !== f.meleeType && e.unitType !== f.rangedType) continue;
+        raiders += 1;
+      }
+      if (raiders <= 0) continue;
+      node.raidDamageCooldown = Math.max(node.raidDamageCooldown, 4 + raiders * 1.5);
+      node.safety = Math.max(0.1, node.safety - 0.08 * raiders);
+      node.infrastructureLevel = Math.max(0, node.infrastructureLevel - 0.04 * raiders);
+    }
   }
 
   private recomputeNeeds(s: Settlement, factionId: FactionId) {
@@ -840,7 +1136,7 @@ export class SettlementSystem {
         !e.isConstructed,
     );
     if (unfinished) {
-      this.assignIdleWorkers(s, entities, unfinished, player);
+      this.advanceCivicConstruction(s, unfinished, dt);
     }
 
     const active = s.queue.active();
@@ -853,6 +1149,14 @@ export class SettlementSystem {
     const next = s.queue.nextQueued();
     if (!next) return;
     this.tryStartProject(s, next, entities, match, gameMap, player);
+  }
+
+  /** Construction progress from civic labor pool — not map Worker micro. */
+  private advanceCivicConstruction(s: Settlement, building: Building, dt: number) {
+    if (building.isConstructed) return;
+    const labor = Math.max(0.35, s.civicLabor);
+    const rate = 6 + labor * 4.5;
+    building.constructionProgress += rate * dt;
   }
 
   private tryStartProject(
@@ -876,10 +1180,8 @@ export class SettlementSystem {
     if (s.population < recipe.minPopulation) return;
     if (!s.canAfford(recipe.costs)) return;
 
-    const faction = FACTIONS[player.factionId];
-    const idle = this.countIdleWorkers(s, entities, faction.workerType);
-    if (idle < recipe.buildersRequired) return;
-    if (project.target !== 'Road' && populationSim.countByProfession(s).builder < 1) return;
+    // Civic labor gate (builders profession / pool) — replaces idle map workers.
+    if (s.civicLabor < recipe.buildersRequired * 0.55) return;
 
     const busy = entities.some(
       (e) =>
@@ -903,11 +1205,6 @@ export class SettlementSystem {
       project.roadTiles = tiles;
       project.roadIndex = 0;
       s.queue.markBuilding(project.id, null);
-      const worker = this.findIdleWorker(s, entities, faction.workerType);
-      if (worker) {
-        const t0 = tiles[0]!;
-        worker.moveCommand((t0.tx + 0.5) * gameMap.tileSize, (t0.ty + 0.5) * gameMap.tileSize);
-      }
       s.buildCooldown = 2;
       return;
     }
@@ -980,7 +1277,6 @@ export class SettlementSystem {
     building.settlementId = s.id;
     entities.push(building);
     s.queue.markBuilding(project.id, building.id);
-    this.assignIdleWorkers(s, entities, building, player);
     s.buildCooldown = 3;
   }
 
@@ -993,7 +1289,7 @@ export class SettlementSystem {
     dt: number,
   ) {
     if (project.target === 'Road') {
-      this.advanceRoadProject(s, project, entities, gameMap, player, dt);
+      this.advanceRoadProject(s, project, gameMap, dt);
       return;
     }
     if (project.buildingId == null) {
@@ -1009,47 +1305,28 @@ export class SettlementSystem {
       s.queue.markDone(project.id);
       s.buildCooldown = 2;
     } else if (building instanceof Building) {
-      this.assignIdleWorkers(s, entities, building, player);
+      this.advanceCivicConstruction(s, building, dt);
+      void player;
     }
   }
 
   private advanceRoadProject(
     s: Settlement,
     project: ConstructionProject,
-    entities: Entity[],
     gameMap: GameMap,
-    player: PlayerState,
     dt: number,
   ) {
     if (project.roadIndex >= project.roadTiles.length) {
       s.queue.markDone(project.id);
       return;
     }
-    const faction = FACTIONS[player.factionId];
-    const tile = project.roadTiles[project.roadIndex]!;
-    const wx = (tile.tx + 0.5) * gameMap.tileSize;
-    const wy = (tile.ty + 0.5) * gameMap.tileSize;
-
-    let builder: Unit | null = null;
-    for (const e of entities) {
-      if (!(e instanceof Unit) || e.isDead || e.ownerPlayerId !== s.playerId) continue;
-      if (e.unitType !== faction.workerType) continue;
-      if (e.settlerGroupId) continue;
-      if (!this.belongsToSettlement(e, s, this.allForOwner(s.playerId))) continue;
-      builder = e;
-      break;
-    }
-    if (!builder) return;
-
-    if (Math.hypot(builder.x - wx, builder.y - wy) > 36) {
-      builder.moveCommand(wx, wy);
-      return;
-    }
-
-    s.roadWorkTimer += dt;
-    if (s.roadWorkTimer < 1.2) return;
+    // Civic labor lays road tiles over time (no Worker walk required).
+    const labor = Math.max(0.4, s.civicLabor);
+    s.roadWorkTimer += dt * (0.7 + labor * 0.35);
+    if (s.roadWorkTimer < 1.0) return;
     s.roadWorkTimer = 0;
 
+    const tile = project.roadTiles[project.roadIndex]!;
     const idx = tile.ty * gameMap.tileWidth + tile.tx;
     const current = gameMap.tiles[idx]!;
     if (current.type === 'grass' || current.type === 'hill' || current.type === 'forest') {
@@ -1078,33 +1355,24 @@ export class SettlementSystem {
     return out;
   }
 
-  private updateSettlerMissions(entities: Entity[], match: MatchState) {
+  private updateSettlerMissions(entities: Entity[], match: MatchState, dt: number) {
     for (const group of this.settlerGroups) {
       if (group.status !== 'traveling' || group.targetX == null || group.targetY == null) continue;
 
-      const settlers = entities.filter(
+      const legacyEscorts = entities.filter(
         (e): e is Unit =>
           e instanceof Unit && !e.isDead && e.settlerGroupId === group.id,
       );
-      if (settlers.length === 0) {
-        const parent = this.getById(group.parentSettlementId);
-        const stranded = this.transitCitizens.get(group.id);
-        if (parent && stranded) {
-          for (const c of stranded) {
-            c.settlementId = parent.id;
-            parent.citizens.push(c);
-          }
-        }
-        group.status = 'failed';
-        this.transitCitizens.delete(group.id);
-        continue;
-      }
 
-      const arrived = settlers.filter(
-        (u) => Math.hypot(u.x - group.targetX!, u.y - group.targetY!) <= FOUNDING_ARRIVAL_DIST,
-      );
-      if (arrived.length < Math.ceil(settlers.length * 0.6)) {
-        for (const u of settlers) {
+      // Prefer caravan motion; escorts are optional legacy.
+      const dx = group.targetX - group.caravanX;
+      const dy = group.targetY - group.caravanY;
+      const dist = Math.hypot(dx, dy);
+      if (dist > FOUNDING_ARRIVAL_DIST) {
+        const step = Math.min(dist, group.caravanSpeed * dt);
+        group.caravanX += (dx / dist) * step;
+        group.caravanY += (dy / dist) * step;
+        for (const u of legacyEscorts) {
           if (Math.hypot(u.x - group.targetX, u.y - group.targetY) > FOUNDING_ARRIVAL_DIST) {
             u.moveCommand(group.targetX, group.targetY);
           }
@@ -1147,7 +1415,6 @@ export class SettlementSystem {
       camp.wood = 40;
       camp.stone = 20;
 
-      // Transfer a bit of stock from parent
       const parent = this.getById(group.parentSettlementId);
       if (parent) {
         const takeFood = Math.min(20, parent.food * 0.2);
@@ -1155,14 +1422,14 @@ export class SettlementSystem {
         camp.food += takeFood;
       }
 
-      for (const u of settlers) {
+      for (const u of legacyEscorts) {
         u.settlerGroupId = null;
         const jitter = this.tickRng ? this.tickRng.range(-20, 20) : 0;
         u.moveCommand(group.targetX + jitter, group.targetY + 30);
       }
 
       group.status = 'complete';
-      SettlementSystem.onSettlementFounded?.(group.ownerPlayerId, settlers, camp);
+      SettlementSystem.onSettlementFounded?.(group.ownerPlayerId, legacyEscorts, camp);
     }
 
     this.settlerGroups = this.settlerGroups.filter(
@@ -1174,58 +1441,6 @@ export class SettlementSystem {
     if (target === 'House') return 'housing';
     if (target === 'Farm' || target === 'PigFarm') return 'food';
     return 'storage';
-  }
-
-  private countIdleWorkers(s: Settlement, entities: Entity[], workerType: string): number {
-    let n = 0;
-    const owned = this.allForOwner(s.playerId);
-    for (const e of entities) {
-      if (!(e instanceof Unit) || e.isDead || e.ownerPlayerId !== s.playerId) continue;
-      if (e.unitType !== workerType) continue;
-      if (e.settlerGroupId) continue;
-      if (!this.belongsToSettlement(e, s, owned)) continue;
-      if (e.buildTarget || e.gatherTarget || e.targetEntity) continue;
-      n++;
-    }
-    return n;
-  }
-
-  private findIdleWorker(s: Settlement, entities: Entity[], workerType: string): Unit | null {
-    const owned = this.allForOwner(s.playerId);
-    for (const e of entities) {
-      if (!(e instanceof Unit) || e.isDead || e.ownerPlayerId !== s.playerId) continue;
-      if (e.unitType !== workerType) continue;
-      if (e.settlerGroupId) continue;
-      if (!this.belongsToSettlement(e, s, owned)) continue;
-      if (e.buildTarget || e.gatherTarget || e.targetEntity) continue;
-      return e;
-    }
-    return null;
-  }
-
-  private assignIdleWorkers(
-    s: Settlement,
-    entities: Entity[],
-    building: Building,
-    player: PlayerState,
-  ) {
-    const workerType = FACTIONS[player.factionId].workerType;
-    const owned = this.allForOwner(s.playerId);
-    let assigned = 0;
-    for (const e of entities) {
-      if (!(e instanceof Unit) || e.isDead || e.ownerPlayerId !== s.playerId) continue;
-      if (e.unitType !== workerType) continue;
-      if (e.settlerGroupId) continue;
-      if (!this.belongsToSettlement(e, s, owned)) continue;
-      if (e.buildTarget === building) {
-        assigned++;
-        continue;
-      }
-      if (e.buildTarget || e.gatherTarget) continue;
-      e.buildCommand(building);
-      assigned++;
-      if (assigned >= 3) break;
-    }
   }
 }
 
