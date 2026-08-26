@@ -50,7 +50,7 @@ export const FORMATION_DEFS: Record<SquadFormation, FormationEffects> = {
   shieldWall: {
     id: 'shieldWall',
     label: 'Shield Wall',
-    spacingMul: 0.72,
+    spacingMul: 0.9,
     speedMul: 0.72,
     meleeTakenMul: 0.78,
     rangedTakenMul: 0.92,

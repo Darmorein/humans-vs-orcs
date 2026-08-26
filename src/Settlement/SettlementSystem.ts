@@ -26,7 +26,7 @@ import type { ConstructionProject } from './ConstructionQueue';
 import { Settlement, emptyIncomeSources } from './Settlement';
 import type { SettlementNeedKind } from './Types';
 import { SettlementPlanner, settlementPlanner } from './SettlementPlanner';
-import { populationSim } from './Population/PopulationSim';
+import { populationSim, MIN_CIVILIAN_RESERVE } from './Population/PopulationSim';
 import {
   focusNeedBias,
   type SettlementFocus,
@@ -60,11 +60,16 @@ import { CITY_PACING } from '../Match/MatchPacing';
 
 const WOOD_PASSIVE = 0.25;
 const STONE_PASSIVE = 0.1;
+/** Capital/town civic gold — tax bootstrap without requiring a lucky mine. */
+const GOLD_CIVIC_PASSIVE = 1.35;
 /** Base gold extraction per second at infra 0 / full safety / owned. */
 const GOLD_BASE_EXTRACTION = CITY_PACING.goldBaseExtraction;
 const FOOD_PER_FARM = 1.15;
 /** Matches PopulationSim food use — used for tax food-reserve target. */
 const FOOD_PER_CITIZEN = 0.45;
+/** Seconds of food buffer used for tax health — short-match friendly. */
+const TAX_FOOD_BUFFER_SEC = 16;
+const MIN_LOCAL_GOLD_RESERVE = 35;
 const LINK_MINE_RANGE = 520;
 const RAID_RANGE = 90;
 /** Pre-scale outpost recipe — treasury cost eased so Outpost precedes City2. */
@@ -83,7 +88,6 @@ export const OUTPOST_TREASURY_COST = treasuryGoldCost(OUTPOST_COST);
 const OUTPOST_MIN_DIST_FROM_TC = CITY_PACING.outpostMinDistFromTc;
 const OUTPOST_MAX_DIST_FROM_ARMY = 110;
 const OUTPOST_MIN_DIST_BETWEEN = 140;
-const MIN_LOCAL_GOLD_RESERVE = 40;
 const TAX_TICK_INTERVAL = 1;
 
 let nextSettlementSeq = 1;
@@ -682,7 +686,7 @@ export class SettlementSystem {
 
   /**
    * Draft `count` citizens near a world point for recruitment.
-   * @returns settlement id on success, null if pool too small / no seat.
+   * @returns settlement id on success, null if pool too small / reserve / no seat.
    */
   public draftForRecruitment(
     playerId: string,
@@ -694,6 +698,27 @@ export class SettlementSystem {
     if (!s || !s.hasTownCenter) return null;
     if (!populationSim.draftCitizens(s, count)) return null;
     return s.id;
+  }
+
+  /** One primary reason recruitment draft would fail at a seat. */
+  public draftBlockReason(
+    playerId: string,
+    nearX: number,
+    nearY: number,
+    count: number,
+  ): string | null {
+    const s = this.nearestSettlement(playerId, nearX, nearY);
+    if (!s || !s.hasTownCenter) return 'No town to draft from';
+    if (s.citizens.length < count) {
+      return `Need ${count - s.citizens.length} more population`;
+    }
+    if (s.citizens.length - count < MIN_CIVILIAN_RESERVE) {
+      const room = Math.max(0, s.citizens.length - MIN_CIVILIAN_RESERVE);
+      return room <= 0
+        ? 'Population reserve too low'
+        : `Population reserve too low (can draft ${room})`;
+    }
+    return null;
   }
 
   /** Combat death feedback on the nearest owned settlement. */
@@ -869,8 +894,17 @@ export class SettlementSystem {
     sources.foodFarms = s.farmCount * FOOD_PER_FARM * farmMult * s.safety * dt;
     s.food = clamp(s.food + sources.foodFarms, 0, s.capacity.food);
 
-    let goldGain = 0;
     const by = populationSim.countByProfession(s);
+    const civicGold =
+      s.hasTownCenter
+        ? GOLD_CIVIC_PASSIVE *
+          (0.85 + Math.min(0.4, s.prosperity * 0.5)) *
+          (s.focus === 'economy' || s.focus === 'crafting' ? 1.1 : 1) *
+          dt
+        : 0;
+    sources.goldPassive = civicGold;
+
+    let goldGain = civicGold;
     const minerBoost = 1 + by.miner * 0.04;
     const specBoost =
       s.specialization === 'mining' ? 1.2 : s.specialization === 'trade' ? 1.08 : 1;
@@ -923,7 +957,7 @@ export class SettlementSystem {
       goldGain += extracted;
     }
 
-    sources.goldMines = goldGain;
+    sources.goldMines = goldGain - civicGold;
     s.gold += goldGain;
     s.incomeSources = sources;
     s.incomeRates = {
@@ -936,8 +970,9 @@ export class SettlementSystem {
   }
 
   /**
-   * Remit taxable surplus from settlements → Faction Treasury (~1s).
-   * Local production stays in settlement.gold until taxed.
+   * Remit tax from settlements → Faction Treasury (~1s).
+   * Model: subsistence food soft-factor × (income share + surplus share).
+   * Never hard-locks remittance to 0 solely because local stock is below a huge buffer.
    */
   private applyTaxTick(match: MatchState, interval: number) {
     const house = getRecipe('House');
@@ -956,14 +991,22 @@ export class SettlementSystem {
           continue;
         }
 
-        const foodTarget = s.citizens.length * FOOD_PER_CITIZEN * 45;
-        const foodCritical = s.food < foodTarget * 0.25 || s.food < 8;
-        const healthFactor =
-          foodCritical || s.prosperity < 0.2 ? 0 : clamp(0.55 + s.prosperity * 0.45, 0, 1);
+        const foodTarget = Math.max(24, s.citizens.length * FOOD_PER_CITIZEN * TAX_FOOD_BUFFER_SEC);
+        const foodRatio = s.food / Math.max(foodTarget * 0.25, 10);
+        // Soft floor: starving cities remit little, healthy cities remit full.
+        const foodHealth = clamp(0.2 + foodRatio * 0.8, 0.2, 1);
+        const prosperityHealth =
+          s.prosperity < 0.12 ? 0.4 : clamp(0.55 + s.prosperity * 0.45, 0.4, 1);
+        const healthFactor = foodHealth * prosperityHealth;
 
         const goldReserve = goldReserveBase;
-        const taxableSurplus = Math.max(0, s.gold - goldReserve) * healthFactor;
-        const transfer = taxableSurplus * tax.rate;
+        const incomeGold = Math.max(0, s.incomeRates.gold) * interval;
+        // Split: tax a share of current production + a share of surplus stock.
+        const incomeTransfer = incomeGold * tax.rate * healthFactor;
+        const taxableSurplus = Math.max(0, s.gold - goldReserve - incomeGold) * healthFactor;
+        const surplusTransfer = taxableSurplus * tax.rate * 0.45;
+        const transfer = Math.min(s.gold, incomeTransfer + surplusTransfer);
+
         if (transfer > 0.01) {
           s.gold -= transfer;
           player.gold += transfer;

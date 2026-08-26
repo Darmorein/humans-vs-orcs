@@ -57,7 +57,7 @@ export const CITY_PACING = {
   localStartPop: 42,
   aiStartPop: 48,
   startLocalGold: 100,
-  startFood: 70,
+  startFood: 180,
 } as const;
 
 /**

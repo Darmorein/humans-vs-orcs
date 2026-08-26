@@ -198,7 +198,7 @@ export function analyzeStrategicSituation(ctx: AnalyzeContext): StrategicSituati
         )
       : 0;
 
-  const armyRatio = armyStrength / Math.max(12, enemyArmyStrength);
+  const armyRatio = armyStrength / Math.max(enemyArmyStrength, 6);
 
   return {
     civicPopulation,

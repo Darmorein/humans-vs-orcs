@@ -16,6 +16,10 @@ import {
 } from '../Combat/TacticalTerrain';
 import { doctrineOf } from '../Players/FactionDoctrine';
 import type { SquadSystem } from '../Combat/SquadSystem';
+import {
+  defaultMeleeSquadTemplate,
+  defaultRangedSquadTemplate,
+} from '../Combat/SquadTemplates';
 import type { GameCommand } from '../Sim/Commands';
 import type { GameRng } from '../Sim/GameRng';
 import { TAX_POLICY_COOLDOWN_TICKS, type TaxPolicy } from '../Players/TaxPolicy';
@@ -537,7 +541,7 @@ export class AISystem {
     if (
       !sit.hasProduction &&
       this.getGold() >= barracksNeed &&
-      sit.unitPop >= Math.min(4, Math.max(2, sit.unitMaxPop * 0.4))
+      sit.unitPop >= 2
     ) {
       this.queueBuildingNearMain(entities, gameMap, main, faction.productionBuilding);
       return;
@@ -723,13 +727,14 @@ export class AISystem {
   }
 
   /**
-   * Train military when threatened / expanding. Workers are no longer trained.
+   * Recruit complete squads (not individual units).
    */
   private manageTraining(entities: Entity[]) {
     const faction = this.getFaction();
     const main = this.getMainBuilding(entities);
     const sit = this.situation;
-    if (!faction || !main || !sit) return;
+    const player = this.getPlayer();
+    if (!faction || !main || !sit || !player) return;
     if (sit.unitPop >= sit.unitMaxPop) return;
 
     const military = this.getMilitary(entities);
@@ -744,49 +749,47 @@ export class AISystem {
         this.isOwn(e),
     );
     if (!barracks) return;
-    if (military.length >= militaryTarget || this.getGold() < 80) return;
-    if (this.state === 'develop' && military.length >= Math.max(2, militaryTarget - 2)) return;
+
+    const squadCount = this.squads?.squadsForOwner(this.playerId).length ?? 0;
+    const squadTarget = Math.max(2, Math.ceil(militaryTarget / 4));
+    if (squadCount >= squadTarget && military.length >= militaryTarget) return;
+    if (this.state === 'develop' && squadCount >= 3 && military.length >= 8) return;
 
     const preferRanged = this.shouldTrainRanged(entities, faction, military);
-    if (preferRanged && this.getGold() >= 100) {
-      this.enqueue({
-        type: 'trainUnit',
-        playerId: this.playerId,
-        buildingId: barracks.id,
-        unitType: faction.rangedType,
-      });
-    } else {
-      this.enqueue({
-        type: 'trainUnit',
-        playerId: this.playerId,
-        buildingId: barracks.id,
-        unitType: faction.meleeType,
-      });
-    }
+    const template = preferRanged
+      ? defaultRangedSquadTemplate(player.factionId)
+      : defaultMeleeSquadTemplate(player.factionId);
+    if (this.getGold() < template.treasuryCost) return;
+
+    this.enqueue({
+      type: 'recruitSquad',
+      playerId: this.playerId,
+      templateId: template.id,
+    });
   }
 
   private desiredMilitary(sit: StrategicSituation): number {
     const d = doctrineOf(this.getPlayer()?.factionId ?? 'orcs');
-    let n = Math.ceil(2 + sit.enemyArmyCount * 0.65);
+    let n = Math.ceil(4 + sit.enemyArmyCount * 0.65);
     switch (this.state) {
       case 'develop':
-        n = Math.max(2, Math.ceil(sit.enemyArmyCount * 0.4));
+        n = Math.max(6, Math.ceil(sit.enemyArmyCount * 0.55 + 3));
         break;
       case 'expand':
-        n = Math.max(3, Math.ceil(sit.enemyArmyCount * 0.55));
+        n = Math.max(5, Math.ceil(sit.enemyArmyCount * 0.6 + 2));
         break;
       case 'recover':
-        n = Math.max(3, Math.ceil(sit.enemyArmyCount * 0.7));
+        n = Math.max(5, Math.ceil(sit.enemyArmyCount * 0.7 + 2));
         break;
       case 'fortify':
       case 'defend':
-        n = Math.max(5, Math.ceil(sit.enemyArmyCount * 0.9 + 2));
+        n = Math.max(6, Math.ceil(sit.enemyArmyCount * 0.9 + 2));
         break;
       case 'raid':
-        n = Math.max(4, Math.ceil(sit.enemyArmyCount * 0.75 + 1));
+        n = Math.max(5, Math.ceil(sit.enemyArmyCount * 0.75 + 2));
         break;
       case 'attack':
-        n = Math.max(6, Math.ceil(sit.enemyArmyCount * 1.05 + 2));
+        n = Math.max(7, Math.ceil(sit.enemyArmyCount * 1.05 + 2));
         break;
     }
     return Math.ceil(n / d.militaryTrainGoldMul);
@@ -892,11 +895,11 @@ export class AISystem {
 
     const d = doctrineOf(this.getFaction()?.id ?? 'orcs');
     const sit = this.situation;
-    let desiredGuards = 1 + d.aiGuardCountBonus;
-    if (this.state === 'defend') desiredGuards = 4 + d.aiGuardCountBonus;
-    else if (this.state === 'fortify') desiredGuards = 3 + d.aiGuardCountBonus;
-    else if (this.state === 'recover') desiredGuards = 2 + d.aiGuardCountBonus;
-    else if (sit?.primaryBridgeContested) desiredGuards = 3 + d.aiGuardCountBonus;
+    let desiredGuards = this.state === 'develop' || this.state === 'expand' ? 0 : 1 + d.aiGuardCountBonus;
+    if (this.state === 'defend') desiredGuards = 3 + d.aiGuardCountBonus;
+    else if (this.state === 'fortify') desiredGuards = 2 + d.aiGuardCountBonus;
+    else if (this.state === 'recover') desiredGuards = 1 + d.aiGuardCountBonus;
+    else if (sit?.primaryBridgeContested) desiredGuards = 2 + d.aiGuardCountBonus;
 
     const military = this.getMilitary(entities);
     let guards = military.filter((u) => this.guardIds.has(u.id));
@@ -944,6 +947,19 @@ export class AISystem {
   // --- Offense (only when posture asks for it) ---------------------------
 
   private tryMilitaryAction(entities: Entity[], gameMap?: GameMap): boolean {
+    // After early boom, allow light frontier pressure even while developing.
+    const boomReady = (this.situation?.armyCount ?? 0) >= 4;
+    if (
+      (this.state === 'develop' || this.state === 'expand' || this.state === 'recover') &&
+      boomReady
+    ) {
+      const military = this.getMilitary(entities);
+      const free = military.filter((u) => !this.guardIds.has(u.id));
+      if (free.length >= 2) {
+        return this.launchHarass(entities, free, gameMap, Math.min(3, free.length));
+      }
+    }
+
     if (
       this.state === 'develop' ||
       this.state === 'expand' ||
@@ -966,14 +982,14 @@ export class AISystem {
 
     if (this.state === 'raid') {
       const size = sit && sit.armyRatio >= 1.0 ? 3 : 2;
-      if (free.length >= 4 && rng.chance((sit?.doctrineHarass ?? 0.5) * 0.35)) {
+      if (free.length >= 3 && rng.chance((sit?.doctrineHarass ?? 0.5) * 0.4)) {
         return this.launchAssault(entities, free, gameMap, false);
       }
       return this.launchHarass(entities, free, gameMap, size);
     }
 
     // attack
-    return this.launchAssault(entities, free, gameMap, (sit?.armyRatio ?? 0) >= 1.25);
+    return this.launchAssault(entities, free, gameMap, (sit?.armyRatio ?? 0) >= 1.15);
   }
 
   private launchHarass(
@@ -1050,13 +1066,13 @@ export class AISystem {
     const faction = this.getFaction();
     if (!faction) return false;
 
-    const minSize = allIn ? 5 : 4;
+    const minSize = allIn ? 3 : 2;
     if (free.length < minSize) return false;
 
     const target = this.pickSiegeTarget(entities);
     if (!target) return false;
 
-    const keep = allIn ? 1 : Math.min(2, Math.floor(free.length / 4));
+    const keep = allIn ? 1 : Math.min(1, Math.floor(free.length / 5));
     const squad = free.slice(keep);
     if (squad.length < minSize) return false;
 

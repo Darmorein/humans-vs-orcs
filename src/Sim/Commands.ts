@@ -15,6 +15,8 @@ export type GameCommand =
   | FoundSettlementCommand
   | FormSettlerGroupCommand
   | TrainUnitCommand
+  | RecruitSquadCommand
+  | ReinforceSquadCommand
   | MoveAgentsCommand
   | GatherCommand
   | AssistBuildCommand
@@ -80,6 +82,18 @@ export interface TrainUnitCommand extends CommandBase {
   unitType: string;
   /** Ignored at apply — cost comes from UnitCatalog + doctrine. Kept for log compat. */
   cost?: number;
+}
+
+/** Recruit a full squad from a Barracks / city military queue. */
+export interface RecruitSquadCommand extends CommandBase {
+  type: 'recruitSquad';
+  templateId: string;
+}
+
+/** Reinforce a depleted squad near a friendly city. */
+export interface ReinforceSquadCommand extends CommandBase {
+  type: 'reinforceSquad';
+  squadId: string;
 }
 
 export interface MoveAgentsCommand extends CommandBase {

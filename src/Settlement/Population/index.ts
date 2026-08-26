@@ -1,4 +1,4 @@
-export { PopulationSim, populationSim } from './PopulationSim';
+export { PopulationSim, populationSim, MIN_CIVILIAN_RESERVE } from './PopulationSim';
 export {
   type Citizen,
   type ProfessionRole,

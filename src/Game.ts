@@ -13,7 +13,7 @@ import { ResourceNode } from './Entities/ResourceNode';
 import { SelectionSystem } from './Systems/SelectionSystem';
 import { UIManager } from './UI/UIManager';
 import { FogOfWar } from './Systems/FogOfWar';
-import { drawIsoBox, isoDepth } from './Engine/Iso';
+import { drawIsoBox, drawIsoEllipse, isoDepth } from './Engine/Iso';
 import { assets } from './Assets/Assets';
 import { createDefaultMatch, createPvpMatch, MatchState, type PlayerState } from './Players/MatchState';
 import type { PlayerController } from './Players/PlayerController';
@@ -65,7 +65,8 @@ import {
   type SaveGame,
 } from './Sim';
 import { compareAiVsAiHashes, diffSnapshotHints } from './Sim/determinismTest';
-import { spawnUnitNearBuilding } from './Sim/spawnUnit';
+import { spawnUnitRegistered } from './Sim/spawnUnit';
+import { unitSpawnOptions } from './Sim/UnitCatalog';
 import { PVP_COMMAND_DELAY_TICKS, type PvpSession } from './Net';
 import {
   CITY_PACING,
@@ -75,6 +76,13 @@ import {
   strategicDominanceScore,
 } from './Match/MatchPacing';
 import { isCombatUnitType } from './Combat/Squad';
+import { MilitaryRecruitmentSystem } from './Combat/MilitaryRecruitment';
+import {
+  defaultMeleeSquadTemplate,
+  squadTemplatesForFaction,
+} from './Combat/SquadTemplates';
+import { formationOffsets, orientOffsets } from './Combat/Formations';
+import { doctrineOf } from './Players/FactionDoctrine';
 
 /** Boot options for skirmish or synchronized PvP 1v1. */
 export interface GameOptions {
@@ -117,6 +125,7 @@ export class Game {
   private influenceMap: InfluenceMap;
   private civilianVisuals = civilianVisualAgents;
   private squadSystem: SquadSystem;
+  private recruitment = new MilitaryRecruitmentSystem();
   private heroSystem: HeroSystem;
   private artifactSystem: ArtifactSystem;
   private worldHistory: WorldHistory;
@@ -135,6 +144,13 @@ export class Game {
   /** Short-lived player-facing build / place feedback (not serialized). */
   private buildFeedback: string | null = null;
   private buildFeedbackTimer = 0;
+  /** Brief ground cue after Move/Attack (local feedback only). */
+  private orderMarker: {
+    x: number;
+    y: number;
+    ttl: number;
+    kind: 'move' | 'attack';
+  } | null = null;
   private gameState: 'playing' | 'victory' | 'defeat' = 'playing';
   private readonly pacingDiag = new MatchPacingDiagnostics();
   private readonly debugPacing =
@@ -419,6 +435,7 @@ export class Game {
       settlements: this.settlementSystem,
       pendingCommands: this.commandQueue.snapshotPending(),
       squads: this.squadSystem,
+      recruitment: this.recruitment,
       heroes: this.heroSystem,
       artifacts: this.artifactSystem,
       history: this.worldHistory,
@@ -502,6 +519,7 @@ export class Game {
       match: this.match,
       settlements: this.settlementSystem,
       squads: this.squadSystem,
+      recruitment: this.recruitment,
       heroes: this.heroSystem,
       artifacts: this.artifactSystem,
       history: this.worldHistory,
@@ -680,6 +698,7 @@ export class Game {
   }
 
   public trainUnit(building: Building, type: string, cost?: number) {
+    // Legacy single-unit path — kept for replay/saves; UI uses recruitSquad.
     this.submitCommand({
       type: 'trainUnit',
       playerId: this.match.localPlayerId,
@@ -687,6 +706,51 @@ export class Game {
       unitType: type,
       cost,
     });
+  }
+
+  public recruitSquad(templateId: string) {
+    this.submitCommand({
+      type: 'recruitSquad',
+      playerId: this.match.localPlayerId,
+      templateId,
+    });
+  }
+
+  public reinforceSquad(squadId: string) {
+    this.submitCommand({
+      type: 'reinforceSquad',
+      playerId: this.match.localPlayerId,
+      squadId,
+    });
+  }
+
+  public recruitSquadBlockReason(templateId: string): string | null {
+    return this.recruitment.recruitBlockReason(
+      this.match.localPlayerId,
+      templateId,
+      this.entities,
+      this.match,
+      this.settlementSystem,
+    );
+  }
+
+  public reinforceSquadBlockReason(squadId: string): string | null {
+    return this.recruitment.reinforceBlockReason(
+      this.match.localPlayerId,
+      squadId,
+      this.entities,
+      this.match,
+      this.settlementSystem,
+      this.squadSystem,
+    );
+  }
+
+  public listSquadTemplatesForLocal() {
+    return squadTemplatesForFaction(this.match.localPlayer.factionId);
+  }
+
+  public listMilitaryQueue() {
+    return this.recruitment.list(this.match.localPlayerId);
   }
 
   /** Soft development focus for an owned settlement seat. */
@@ -721,6 +785,42 @@ export class Game {
     return player.id === 'player-1' ? this.gameMap.startA : this.gameMap.startB;
   }
 
+  /** Spawn a complete closed starter infantry squad at the capital. */
+  private spawnStarterSquad(player: PlayerState, x: number, y: number) {
+    const template = defaultMeleeSquadTemplate(player.factionId);
+    const squad = this.squadSystem.createClosedSquad({
+      ownerPlayerId: player.id,
+      unitType: template.memberUnitType,
+      maxSize: template.targetSize,
+      targetSize: template.targetSize,
+      displayName: `1st ${template.displayName.replace(/ Squad$/i, '')}`,
+      templateId: template.id,
+    });
+    squad.formation = doctrineOf(player.factionId).defaultFormation;
+    const offsets = orientOffsets(
+      formationOffsets(squad.formation, template.targetSize, 28),
+      0,
+      1,
+    );
+    const musterX = x + 45;
+    const musterY = y + 55;
+    for (let i = 0; i < template.targetSize; i++) {
+      const o = offsets[i] ?? { x: (i - 1.5) * 22, y: 0 };
+      const unit = spawnUnitRegistered({
+        player,
+        unitType: template.memberUnitType,
+        x: musterX + o.x,
+        y: musterY + o.y,
+        entities: this.entities,
+        squads: this.squadSystem,
+        options: unitSpawnOptions(template.memberUnitType),
+        registerOpts: { preferSquadId: squad.id },
+      });
+      unit.facingX = 0;
+      unit.facingY = 1;
+    }
+  }
+
   private spawnPlayers() {
     for (const player of this.match.allPlayers()) {
       const base = this.baseForPlayer(player);
@@ -728,20 +828,8 @@ export class Game {
 
       this.entities.push(new Building(base.x, base.y, faction.mainBuilding, player));
 
-      // Living start: seed civic population after reconcile; small scout squad for pacing.
-      const scoutCount = 2;
-      for (let i = 0; i < scoutCount; i++) {
-        const type = i === 0 ? faction.meleeType : faction.rangedType;
-        spawnUnitNearBuilding({
-          player,
-          unitType: type,
-          buildingX: base.x,
-          buildingY: base.y,
-          entities: this.entities,
-          squads: this.squadSystem,
-          rng: this.simRng,
-        });
-      }
+      // Living start: one coherent starter infantry squad (teaches squad model).
+      this.spawnStarterSquad(player, base.x, base.y);
     }
 
     for (const gold of this.gameMap.goldDeposits) {
@@ -788,7 +876,7 @@ export class Game {
       s.wood = Math.max(s.wood, 140);
       s.stone = Math.max(s.stone, 85);
       // Faction Treasury stays on player.gold (200–350 from match setup).
-      player.gold = Math.max(player.gold, 200);
+      player.gold = Math.max(player.gold, 400);
       // Local settlement gold is independent — seed ~100, do not mirror treasury.
       s.gold = CITY_PACING.startLocalGold + Math.floor(this.simRng.range(0, 21));
 
@@ -989,6 +1077,7 @@ export class Game {
       match: this.match,
       settlements: this.settlementSystem,
       squads: this.squadSystem,
+      recruitment: this.recruitment,
       rng: this.simRng,
       gameMap: this.gameMap,
       artifacts: this.artifactSystem,
@@ -1000,11 +1089,32 @@ export class Game {
       const ok = applyCommand(cmd, world);
       this.replayRecorder.recordApplied(this.simTick, cmd);
       if (!ok) continue;
+      if (cmd.playerId === this.match.localPlayerId) {
+        if (cmd.type === 'moveSquad' || cmd.type === 'moveAgents') {
+          this.orderMarker = {
+            x: cmd.x,
+            y: cmd.y,
+            ttl: 0.85,
+            kind: 'move',
+          };
+        } else if (cmd.type === 'attack') {
+          const t = this.entities.find((e) => e.id === cmd.targetEntityId);
+          if (t) {
+            this.orderMarker = { x: t.x, y: t.y, ttl: 0.9, kind: 'attack' };
+          }
+        } else if (cmd.type === 'recruitSquad') {
+          this.showBuildFeedback('Squad training started', 2);
+        } else if (cmd.type === 'reinforceSquad') {
+          this.showBuildFeedback('Reinforcements ordered', 2);
+        }
+      }
       if (
         cmd.type === 'moveSquad' ||
         cmd.type === 'moveAgents' ||
         cmd.type === 'attack' ||
-        cmd.type === 'trainUnit'
+        cmd.type === 'trainUnit' ||
+        cmd.type === 'recruitSquad' ||
+        cmd.type === 'reinforceSquad'
       ) {
         this.pacingDiag.noteArmyCommand(elapsed);
       }
@@ -1107,6 +1217,10 @@ export class Game {
       this.buildFeedbackTimer = Math.max(0, this.buildFeedbackTimer - dt);
       if (this.buildFeedbackTimer <= 0) this.buildFeedback = null;
     }
+    if (this.orderMarker) {
+      this.orderMarker.ttl -= dt;
+      if (this.orderMarker.ttl <= 0) this.orderMarker = null;
+    }
 
     this.uiManager.update(this.selectionSystem.selectedEntities);
     this.input.resetFrameState();
@@ -1152,6 +1266,14 @@ export class Game {
 
     const aliveMains = new Set<string>();
 
+    this.squadSystem.steerMarches(dt, {
+      entities: this.entities,
+      gameMap: this.gameMap,
+      influence: this.influenceMap,
+      match: this.match,
+      rng: this.simRng,
+    });
+
     for (const entity of this.entities) {
       entity.update(dt, this.entities, this.gameMap);
 
@@ -1193,6 +1315,13 @@ export class Game {
       gameMap: this.gameMap,
       influence: this.influenceMap,
       match: this.match,
+      rng: this.simRng,
+    });
+    this.recruitment.update(dt, {
+      entities: this.entities,
+      match: this.match,
+      settlements: this.settlementSystem,
+      squads: this.squadSystem,
       rng: this.simRng,
     });
     this.heroSystem.update(dt, this.entities, this.settlementSystem, this.match);
@@ -1242,14 +1371,34 @@ export class Game {
         const dx = e1.x - e2.x;
         const dy = e1.y - e2.y;
         const distSq = dx * dx + dy * dy;
-        const minDist = (e1.radius + e2.radius) * 0.88;
-        if (distSq >= minDist * minDist || distSq <= 0) continue;
+        const sameOwner = e1.ownerPlayerId && e1.ownerPlayerId === e2.ownerPlayerId;
+        const softScale = sameOwner ? 0.72 : 0.88;
+        const minDist = (e1.radius + e2.radius) * softScale;
+        if (distSq >= minDist * minDist) continue;
+        // Coincident stack — deterministic angular nudge (was skipped forever).
+        if (distSq <= 1e-6) {
+          const a = ((e1.id * 17 + e2.id * 31) % 16) * (Math.PI / 8);
+          const push = minDist * 0.35;
+          this.trySlideUnit(e1, Math.cos(a) * push, Math.sin(a) * push);
+          this.trySlideUnit(e2, -Math.cos(a) * push, -Math.sin(a) * push);
+          continue;
+        }
         const dist = Math.sqrt(distSq);
         const overlap = minDist - dist;
         const nx = dx / dist;
         const ny = dy / dist;
-        this.trySlideUnit(e1, nx * overlap * 0.5, ny * overlap * 0.5);
-        this.trySlideUnit(e2, -nx * overlap * 0.5, -ny * overlap * 0.5);
+        // Moving friendlies yield less — prefer traffic flow over rigid packing.
+        const e1Moving = e1.targetX != null || e1.targetEntity != null || e1.followSquadMarch;
+        const e2Moving = e2.targetX != null || e2.targetEntity != null || e2.followSquadMarch;
+        let w1 = 0.5;
+        let w2 = 0.5;
+        if (sameOwner && e1Moving !== e2Moving) {
+          w1 = e1Moving ? 0.25 : 0.75;
+          w2 = 1 - w1;
+        }
+        const strength = sameOwner ? 0.55 : 1;
+        this.trySlideUnit(e1, nx * overlap * w1 * strength, ny * overlap * w1 * strength);
+        this.trySlideUnit(e2, -nx * overlap * w2 * strength, -ny * overlap * w2 * strength);
       }
 
       // Buildings are often spawned before units — must check all, not only j > i.
@@ -1353,6 +1502,17 @@ export class Game {
     }
 
     this.fog.draw(ctx, this.camera);
+
+    if (this.orderMarker && this.orderMarker.ttl > 0) {
+      const m = this.orderMarker;
+      const alpha = Math.min(1, m.ttl / 0.4);
+      const screen = this.camera.worldToScreen(m.x, m.y);
+      const color =
+        m.kind === 'attack'
+          ? `rgba(255, 82, 82, ${0.55 * alpha})`
+          : `rgba(129, 212, 250, ${0.5 * alpha})`;
+      drawIsoEllipse(ctx, screen.x, screen.y, 18 + (1 - alpha) * 10, undefined, color);
+    }
     this.influenceMap.draw(ctx, this.camera);
 
     if (this.placementMode) {
@@ -1720,6 +1880,20 @@ export class Game {
   /** Dev / UI access to local settlement simulation. */
   public getSettlement(playerId?: string) {
     return this.settlementSystem.get(playerId ?? this.match.localPlayerId);
+  }
+
+  public getSettlementSystem(): SettlementSystem {
+    return this.settlementSystem;
+  }
+
+  /** One primary reason train draft would fail near a building. */
+  public trainDraftBlockReason(nearX: number, nearY: number, count: number): string | null {
+    return this.settlementSystem.draftBlockReason(
+      this.match.localPlayerId,
+      nearX,
+      nearY,
+      count,
+    );
   }
 
   public getSettlementForBuilding(building: Building) {

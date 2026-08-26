@@ -12,7 +12,12 @@ import {
   SQUAD_MAX_SIZE,
 } from './Squad';
 import { FORMATION_DEFS } from './FormationDefs';
-import { formationOffsets, orientOffsets } from './Formations';
+import {
+  attackRingPoint,
+  beginSquadMarch,
+  endSquadMarch,
+  steerSquadMarch,
+} from './SquadMarch';
 import {
   clampMorale,
   MORALE_EVENT,
@@ -93,12 +98,17 @@ export class SquadSystem {
       formation: SquadFormation;
       facingX: number;
       facingY: number;
+      targetSize?: number;
+      displayName?: string;
+      templateId?: string | null;
+      closedToAutoJoin?: boolean;
     }>,
   ) {
     this.squads.clear();
     for (const row of rows) {
       if (!isCombatUnitType(row.unitType)) continue;
-      const squad = new Squad(row.id, row.ownerPlayerId, row.unitType, SQUAD_MAX_SIZE);
+      const maxSize = row.targetSize ?? SQUAD_MAX_SIZE;
+      const squad = new Squad(row.id, row.ownerPlayerId, row.unitType, maxSize);
       squad.memberIds = [...row.memberIds];
       squad.leaderId = row.leaderId;
       squad.morale = row.morale;
@@ -108,18 +118,47 @@ export class SquadSystem {
       squad.formation = row.formation;
       squad.facingX = row.facingX;
       squad.facingY = row.facingY;
+      squad.targetSize = row.targetSize ?? maxSize;
+      squad.displayName = row.displayName ?? '';
+      squad.templateId = row.templateId ?? null;
+      squad.closedToAutoJoin = row.closedToAutoJoin ?? false;
       squad.lastMemberCount = row.memberIds.length;
       squad.lastLeaderId = row.leaderId;
       this.squads.set(squad.id, squad);
     }
   }
 
-  public registerUnit(unit: Unit): Squad | null {
+  public registerUnit(
+    unit: Unit,
+    opts?: { forceNew?: boolean; preferSquadId?: string },
+  ): Squad | null {
     if (!isCombatUnitType(unit.unitType)) return null;
     if (!unit.ownerPlayerId) return null;
-    if (unit.squadId && this.squads.has(unit.squadId)) return this.squads.get(unit.squadId)!;
 
-    const open = this.findOpenSquad(unit.ownerPlayerId, unit.unitType);
+    if (opts?.preferSquadId) {
+      const preferred = this.squads.get(opts.preferSquadId);
+      if (preferred && !preferred.isFull) {
+        preferred.memberIds.push(unit.id);
+        unit.squadId = preferred.id;
+        if (preferred.leaderId == null) preferred.leaderId = unit.id;
+        preferred.lastMemberCount = preferred.memberIds.length;
+        preferred.lastLeaderId = preferred.leaderId;
+        this.recomputeStats(preferred, [unit]);
+        return preferred;
+      }
+    }
+
+    if (unit.squadId && this.squads.has(unit.squadId)) {
+      const existing = this.squads.get(unit.squadId)!;
+      if (!existing.memberIds.includes(unit.id)) {
+        existing.memberIds.push(unit.id);
+      }
+      return existing;
+    }
+
+    const open = opts?.forceNew
+      ? undefined
+      : this.findOpenSquad(unit.ownerPlayerId, unit.unitType);
     const squad = open ?? this.createSquad(unit.ownerPlayerId, unit.unitType);
 
     squad.memberIds.push(unit.id);
@@ -134,6 +173,53 @@ export class SquadSystem {
     squad.lastLeaderId = squad.leaderId;
     this.recomputeStats(squad, [unit]);
     return squad;
+  }
+
+  /**
+   * Create a closed (no auto-join) squad for recruitment / starter force.
+   */
+  public createClosedSquad(args: {
+    ownerPlayerId: string;
+    unitType: CombatUnitType;
+    maxSize: number;
+    targetSize: number;
+    displayName: string;
+    templateId: string;
+  }): Squad {
+    const squad = this.createSquad(args.ownerPlayerId, args.unitType, args.maxSize);
+    squad.targetSize = args.targetSize;
+    squad.displayName = args.displayName;
+    squad.templateId = args.templateId;
+    squad.closedToAutoJoin = true;
+    const fid =
+      args.ownerPlayerId && args.templateId.includes('orc')
+        ? 'orcs'
+        : args.templateId.includes('human')
+          ? 'humans'
+          : null;
+    if (fid) squad.formation = doctrineOf(fid).defaultFormation;
+    return squad;
+  }
+
+  private createSquad(
+    ownerPlayerId: string,
+    unitType: CombatUnitType,
+    maxSize = SQUAD_MAX_SIZE,
+  ): Squad {
+    const id = `sq-${nextSquadId++}`;
+    const squad = new Squad(id, ownerPlayerId, unitType, maxSize);
+    this.squads.set(id, squad);
+    return squad;
+  }
+
+  private findOpenSquad(ownerPlayerId: string, unitType: CombatUnitType): Squad | undefined {
+    return this.all().find(
+      (s) =>
+        s.ownerPlayerId === ownerPlayerId &&
+        s.unitType === unitType &&
+        !s.isFull &&
+        !s.closedToAutoJoin,
+    );
   }
 
   /** Credit a kill to the attacker's squad (victory morale). */
@@ -173,11 +259,32 @@ export class SquadSystem {
       this.tickMoraleAndXp(squad, members, dt, entities, gameMap, influence, match);
       this.applyRoutState(squad, members);
       this.recomputeStats(squad, members);
-      if (squad.routing) this.driveFlee(squad, members, entities, rng);
+      if (squad.routing) {
+        endSquadMarch(squad, members);
+        this.driveFlee(squad, members, entities, rng);
+      }
     }
   }
 
-  public orderMove(squad: Squad, x: number, y: number, entities: Entity[]) {
+  /**
+   * Advance shared squad anchors / live formation slots.
+   * Call before Unit.update so members seek refreshed destinations the same tick.
+   */
+  public steerMarches(dt: number, ctx: SquadUpdateContext) {
+    const { entities, gameMap } = ctx;
+    const unitsById = this.unitMap(entities);
+    for (const squad of this.all()) {
+      if (!squad.marchActive || squad.routing) continue;
+      const members = this.membersOf(squad, unitsById);
+      if (members.length === 0) {
+        endSquadMarch(squad, members);
+        continue;
+      }
+      steerSquadMarch(squad, members, dt, gameMap, entities);
+    }
+  }
+
+  public orderMove(squad: Squad, x: number, y: number, entities: Entity[], gameMap?: GameMap) {
     if (squad.routing) return;
     const units = this.livingMembers(squad, entities);
     if (units.length === 0) return;
@@ -187,23 +294,7 @@ export class SquadSystem {
     const dy = center ? y - center.y : 1;
     this.setFacing(squad, dx, dy);
 
-    const offsets = orientOffsets(formationOffsets(squad.formation, units.length), dx, dy);
-    const fx = FORMATION_DEFS[squad.formation];
-
-    units.sort((a, b) => {
-      if (a.id === squad.leaderId) return -1;
-      if (b.id === squad.leaderId) return 1;
-      return a.id - b.id;
-    });
-
-    for (let i = 0; i < units.length; i++) {
-      const o = offsets[i] ?? { x: 0, y: 0 };
-      const u = units[i]!;
-      u.moveCommand(x + o.x, y + o.y);
-      if (fx.id === 'charge') u.chargeStrikeReady = true;
-      u.facingX = squad.facingX;
-      u.facingY = squad.facingY;
-    }
+    beginSquadMarch(squad, x, y, units, gameMap, entities);
   }
 
   public orderAttack(squad: Squad, target: Entity, entities: Entity[]) {
@@ -214,22 +305,39 @@ export class SquadSystem {
     const center = squad.centroid(this.unitMap(entities));
     if (center) this.setFacing(squad, target.x - center.x, target.y - center.y);
 
+    endSquadMarch(squad, units);
     const fx = FORMATION_DEFS[squad.formation];
-    for (const u of units) {
+    const ringR = Math.max(target.radius + 28, 40);
+    units.sort((a, b) => {
+      if (a.id === squad.leaderId) return -1;
+      if (b.id === squad.leaderId) return 1;
+      return a.id - b.id;
+    });
+    for (let i = 0; i < units.length; i++) {
+      const u = units[i]!;
       u.attackCommand(target);
+      // Spread approach points so the whole squad does not path to one pixel.
+      const ring = attackRingPoint(target.x, target.y, i, units.length, ringR);
+      u.approachX = ring.x;
+      u.approachY = ring.y;
       u.facingX = squad.facingX;
       u.facingY = squad.facingY;
       if (fx.id === 'charge') u.chargeStrikeReady = true;
     }
   }
 
-  public setFormation(squad: Squad, formation: SquadFormation, entities?: Entity[]) {
+  public setFormation(
+    squad: Squad,
+    formation: SquadFormation,
+    entities?: Entity[],
+    gameMap?: GameMap,
+  ) {
     if (squad.routing) return;
     squad.formation = formation;
     if (!entities) return;
     const center = squad.centroid(this.unitMap(entities));
     if (!center) return;
-    this.orderMove(squad, center.x, center.y, entities);
+    this.orderMove(squad, center.x, center.y, entities, gameMap);
   }
 
   private setFacing(squad: Squad, dx: number, dy: number) {
@@ -288,19 +396,6 @@ export class SquadSystem {
       }
     }
     return result;
-  }
-
-  private createSquad(ownerPlayerId: string, unitType: CombatUnitType): Squad {
-    const id = `sq-${nextSquadId++}`;
-    const squad = new Squad(id, ownerPlayerId, unitType, SQUAD_MAX_SIZE);
-    this.squads.set(id, squad);
-    return squad;
-  }
-
-  private findOpenSquad(ownerPlayerId: string, unitType: CombatUnitType): Squad | undefined {
-    return this.all().find(
-      (s) => s.ownerPlayerId === ownerPlayerId && s.unitType === unitType && !s.isFull,
-    );
   }
 
   private unitMap(entities: Entity[]): Map<number, Unit> {
