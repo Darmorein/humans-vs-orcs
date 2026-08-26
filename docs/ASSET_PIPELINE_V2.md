@@ -30,6 +30,24 @@ Initial building placement sizes:
 | Economy | Farm | War Hut | 2×2 |
 | Defense | Watchtower | Spike Tower | 1×1 |
 
+## Runtime authority
+
+After `assets.load()` validates and registers the manifest, runtime systems use
+the resolved entry as their primary source of truth:
+
+- `worldScale` and `pivotY` control sprite drawing;
+- `collisionFootprint` sets the circular collision body's conservative radius;
+- `selectionRadius` controls click targeting and the rendered selection ring;
+- `footprint` and `footprintTiles × worldUnitsPerTile` determine building
+  placement clearance (the larger extent wins);
+- the placement preview uses that same resolved clearance.
+
+Legacy constants remain only as boot/test fallbacks when the manifest registry
+has not been loaded or a gameplay sprite has no entry. Runtime diagnostics check
+coverage for every current building mapping, every playable unit sprite and the
+required terrain types. They also warn if `MAP_CONFIG.tileSize` diverges from
+`standards.space.worldUnitsPerTile`.
+
 ## Directional unit sheets
 
 Every production unit targets four authored directions: `NE`, `SE`, `SW`, and
@@ -80,4 +98,3 @@ Before changing `productionStatus` to `production`:
 Prototype assets are intentionally allowed to omit sheets, source dimensions
 and masks. Runtime diagnostics report those remaining production gaps as one
 summary instead of pretending the assets are final.
-

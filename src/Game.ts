@@ -592,7 +592,7 @@ export class Game {
           this.gameMap,
           this.entities,
           this.placementMode && this.placementMode !== 'foundSettlement'
-            ? footprintForBuildingType(this.placementMode)
+            ? footprintForBuildingType(this.placementMode, this.match.localPlayer.factionId)
             : 40,
         ),
       unitOptions: (type: string) => this.unitOptions(type),
@@ -630,7 +630,13 @@ export class Game {
           });
           this.placementMode = null;
         }
-      } else if (this.canPlaceAt(worldPos.x, worldPos.y, footprintForBuildingType(this.placementMode))) {
+      } else if (
+        this.canPlaceAt(
+          worldPos.x,
+          worldPos.y,
+          footprintForBuildingType(this.placementMode, local.factionId),
+        )
+      ) {
         this.submitCommand({
           type: 'queueBuilding',
           playerId: local.id,
@@ -850,7 +856,7 @@ export class Game {
       const foot =
         this.placementMode === 'foundSettlement'
           ? 44
-          : footprintForBuildingType(this.placementMode);
+          : footprintForBuildingType(this.placementMode, this.match.localPlayer.factionId);
       const valid = this.canPlaceAt(worldPos.x, worldPos.y, foot);
       if (this.placementMode === 'foundSettlement') {
         ctx.globalAlpha = 0.5;
@@ -865,8 +871,7 @@ export class Game {
         ctx.textAlign = 'center';
         ctx.fillText('Found Settlement Here', screenPos.x, screenPos.y - 36);
       } else {
-        const radius =
-          this.placementMode === 'Barracks' || this.placementMode === 'OrcBarracks' ? 40 : 30;
+        const radius = foot;
         const height =
           this.placementMode === 'Barracks' || this.placementMode === 'OrcBarracks' ? 38 : 18;
         ctx.globalAlpha = 0.55;

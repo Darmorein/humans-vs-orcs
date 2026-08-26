@@ -1,5 +1,6 @@
 import type { BuildingType } from '../Entities/Building';
 import type { AssetKey } from './AssetPaths';
+import type { AssetEntry } from './Manifest';
 import { assetManifest } from './Manifest/Registry';
 
 export function buildingSpriteKey(
@@ -36,15 +37,17 @@ export function buildingSpriteKey(
   }
 }
 
-/** Prefer Manifest v2 worldScale; fall back to legacy constants. */
-export function buildingSpriteScale(type: BuildingType): number {
-  if (type === 'House') return 0.16;
-  if (type === 'Storage' || type === 'Market') return 0.18;
-  if (type === 'Wall') return 0.14;
-  if (type === 'Blacksmith' || type === 'Temple') return 0.2;
-  if (type === 'Fort') return 0.22;
-  const key = buildingSpriteKey(type);
-  const meta = assetManifest.get(key);
+/** Manifest entry used by both rendering and gameplay geometry. */
+export function buildingAssetMeta(
+  type: BuildingType,
+  factionId: string = 'humans',
+): AssetEntry | undefined {
+  return assetManifest.get(buildingSpriteKey(type, factionId));
+}
+
+/** Prefer Manifest v2 worldScale; fall back only if the registry is unavailable. */
+export function buildingSpriteScale(type: BuildingType, factionId: string = 'humans'): number {
+  const meta = buildingAssetMeta(type, factionId);
   if (meta) return meta.worldScale;
   switch (type) {
     case 'TownHall':
@@ -64,8 +67,8 @@ export function buildingSpriteScale(type: BuildingType): number {
   }
 }
 
-export function buildingSpritePivotY(type: BuildingType): number {
-  return assetManifest.get(buildingSpriteKey(type))?.pivotY ?? 0.88;
+export function buildingSpritePivotY(type: BuildingType, factionId: string = 'humans'): number {
+  return buildingAssetMeta(type, factionId)?.pivotY ?? 0.88;
 }
 
 export function unitSpriteKey(
@@ -86,25 +89,15 @@ export function unitSpriteKey(
   return null;
 }
 
-export function unitSpriteScale(unitType: string): number {
-  const key =
-    unitType === 'Worker'
-      ? 'human/worker'
-      : unitType === 'Swordsman'
-        ? 'human/swordsman'
-        : unitType === 'Archer'
-          ? 'human/archer'
-          : unitType === 'Peon'
-            ? 'orc/peon'
-            : unitType === 'Grunt'
-              ? 'orc/grunt'
-              : unitType === 'SpearOrc'
-                ? 'orc/spear-orc'
-                : null;
-  if (key) {
-    const meta = assetManifest.get(key);
-    if (meta) return meta.worldScale;
-  }
+/** Manifest entry used by both unit rendering and gameplay geometry. */
+export function unitAssetMeta(factionId: string, unitType: string): AssetEntry | undefined {
+  const key = unitSpriteKey(factionId, unitType);
+  return key ? assetManifest.get(key) : undefined;
+}
+
+export function unitSpriteScale(factionId: string, unitType: string): number {
+  const meta = unitAssetMeta(factionId, unitType);
+  if (meta) return meta.worldScale;
   if (unitType === 'Worker' || unitType === 'Peon') return 0.22;
   if (unitType === 'Archer') return 0.23;
   if (unitType === 'Grunt') return 0.2;
@@ -112,12 +105,6 @@ export function unitSpriteScale(unitType: string): number {
   return 0.24;
 }
 
-export function unitSpritePivotY(unitType: string): number {
-  const key = unitSpriteKey(
-    unitType === 'Peon' || unitType === 'Grunt' || unitType === 'SpearOrc' || unitType === 'Shaman'
-      ? 'orcs'
-      : 'humans',
-    unitType,
-  );
-  return (key && assetManifest.get(key)?.pivotY) || 0.92;
+export function unitSpritePivotY(factionId: string, unitType: string): number {
+  return unitAssetMeta(factionId, unitType)?.pivotY ?? 0.92;
 }

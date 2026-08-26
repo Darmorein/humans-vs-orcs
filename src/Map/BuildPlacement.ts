@@ -1,6 +1,9 @@
 import { Building } from '../Entities/Building';
+import type { BuildingType } from '../Entities/Building';
 import type { Entity } from '../Entities/Entity';
 import { ResourceNode } from '../Entities/ResourceNode';
+import { buildingAssetMeta } from '../Assets/SpriteMap';
+import { ASSET_PRODUCTION_STANDARDS } from '../Assets/Manifest';
 import type { GameMap } from './GameMap';
 
 /**
@@ -37,8 +40,19 @@ export function canPlaceBuildingAt(
   return true;
 }
 
-/** Default clearance radius for a building type (world units). */
-export function footprintForBuildingType(type: string): number {
+/** Manifest-driven clearance radius for a building type (world units). */
+export function footprintForBuildingType(type: string, factionId: string = 'humans'): number {
+  const meta = buildingAssetMeta(type as BuildingType, factionId);
+  if (meta) {
+    const unitsPerTile = ASSET_PRODUCTION_STANDARDS.space.worldUnitsPerTile;
+    return Math.max(
+      meta.footprint.width / 2,
+      meta.footprint.height / 2,
+      (meta.footprintTiles.columns * unitsPerTile) / 2,
+      (meta.footprintTiles.rows * unitsPerTile) / 2,
+    );
+  }
+
   if (type === 'TownHall' || type === 'OrcStronghold' || type === 'Fort') return 48;
   if (type === 'Barracks' || type === 'OrcBarracks') return 40;
   if (type === 'House' || type === 'Wall') return 28;
