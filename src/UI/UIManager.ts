@@ -38,19 +38,24 @@ import { Game } from '../Game';
 export class UIManager {
   private selectionInfoDiv: HTMLElement;
   private actionButtonsDiv: HTMLElement;
+  private citiesOverviewDiv: HTMLElement | null;
   private game: Game;
 
   private lastSelectedEntityId: number | null = null;
   private lastGold: number = -1;
   private lastQueueSig = '';
+  private lastCitiesSig = '';
 
   constructor(game: Game) {
     this.game = game;
     this.selectionInfoDiv = document.getElementById('selection-info')!;
     this.actionButtonsDiv = document.getElementById('action-buttons')!;
+    this.citiesOverviewDiv = document.getElementById('cities-overview');
   }
 
   public update(selectedEntities: Entity[]) {
+    this.renderCitiesOverview();
+
     if (selectedEntities.length === 0) {
       if (this.lastSelectedEntityId !== null) {
         this.selectionInfoDiv.innerHTML = '';
@@ -150,7 +155,10 @@ export class UIManager {
         const by = populationSim.countByProfession(settlement);
         const mil = by.soldier;
         const labor = Math.round(settlement.civicLabor * 10) / 10;
-        infoHtml += `<p>${TIER_DEFS[settlement.tier].label} · Pop ${settlement.population}/${settlement.housing} · Labor ${labor} · Mil ${mil}</p>`;
+        const localPlayer = MatchState.current?.localPlayer;
+        const isCapital = localPlayer?.capitalSettlementId === settlement.id;
+        const tierBit = `${TIER_DEFS[settlement.tier].label}${isCapital ? ' · Capital' : ''}`;
+        infoHtml += `<p>${tierBit} · Pop ${settlement.population}/${settlement.housing} · Labor ${labor} · Mil ${mil}</p>`;
         infoHtml += `<p>Local income +${settlement.localIncomeRate.toFixed(1)}G/s · Tax contrib +${settlement.taxContributionRate.toFixed(1)}/s</p>`;
         infoHtml += `<p class="muted">Mines ${settlement.incomeSources.goldMines.toFixed(1)} · Farms ${settlement.incomeSources.foodFarms.toFixed(1)}</p>`;
         infoHtml += `<p>Infra mines ${settlement.mineCount} · farms ${settlement.farmCount} · outposts ${settlement.outpostCount}</p>`;
@@ -347,29 +355,37 @@ export class UIManager {
       }
 
       if (settlement) {
+        const focusSelect = document.createElement('select');
+        focusSelect.className = 'focus-select';
+        focusSelect.title = 'City focus';
         for (const f of SETTLEMENT_FOCUSES) {
-          const active = settlement.focus === f;
-          this.createButton(
-            `Focus: ${settlementFocusLabel(f)}${active ? ' ✓' : ''}`,
-            true,
-            () => this.game.setSettlementFocus(settlement.id, f as SettlementFocus),
-          );
+          const opt = document.createElement('option');
+          opt.value = f;
+          opt.textContent = `Focus: ${settlementFocusLabel(f)}`;
+          if (settlement.focus === f) opt.selected = true;
+          focusSelect.appendChild(opt);
         }
+        focusSelect.addEventListener('change', () => {
+          this.game.setSettlementFocus(
+            settlement.id,
+            focusSelect.value as SettlementFocus,
+          );
+        });
+        this.actionButtonsDiv.appendChild(focusSelect);
       }
 
       const canForm = this.game.canFormSettlerGroup();
       const ready = this.game.hasReadySettlerGroup();
       const doc = doctrineOf(local.factionId);
       this.createButton(
-        ready
-          ? 'Found Settlement Here'
-          : `Form Settler Caravan (${doc.settlerGoldCost}G/${doc.settlerWoodCost}W)`,
+        ready ? 'Found City Here' : `Found City Here (${doc.settlerGoldCost}T)`,
         true,
         () => {
           if (!ready && !canForm) {
-            this.game.showBuildFeedback(
-              `Settlers need Village+, ${doc.settlerMinPop}+ citizens, and caravan costs`,
-            );
+            const why =
+              this.game.formSettlerGroupBlockReason() ??
+              `Settlers need Town+, ${doc.settlerMinPop}+ citizens, and caravan costs`;
+            this.game.showBuildFeedback(why);
             return;
           }
           if (!ready && canForm) {
@@ -381,7 +397,10 @@ export class UIManager {
       if (!ready && !canForm && settlement) {
         const hint = document.createElement('div');
         hint.className = 'queue-hint';
-        hint.textContent = `Settlers need Village+, ${doc.settlerMinPop}+ citizens (${local.faction.displayName})`;
+        const why = this.game.formSettlerGroupBlockReason();
+        hint.textContent =
+          why ??
+          `Settlers need Town+, ${doc.settlerMinPop}+ citizens (${local.faction.displayName})`;
         this.actionButtonsDiv.appendChild(hint);
       }
 
@@ -445,6 +464,43 @@ export class UIManager {
           this.game.trainUnit(entity, faction.rangedType);
         },
       );
+    }
+  }
+
+  private renderCitiesOverview() {
+    const el = this.citiesOverviewDiv;
+    if (!el) return;
+    const rows = this.game.getOwnedCitiesOverview();
+    const sig = rows
+      .map(
+        (r) =>
+          `${r.id}:${r.tier}:${r.focus}:${r.pop}:${r.underPressure ? 1 : 0}:${r.isCapital ? 1 : 0}`,
+      )
+      .join('|');
+    if (sig === this.lastCitiesSig) return;
+    this.lastCitiesSig = sig;
+    el.innerHTML = '';
+    const title = document.createElement('div');
+    title.className = 'cities-title';
+    title.textContent = 'Cities';
+    el.appendChild(title);
+    if (rows.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'muted';
+      empty.textContent = 'None';
+      el.appendChild(empty);
+      return;
+    }
+    for (const r of rows) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'city-row';
+      const cap = r.isCapital ? ' · Capital' : '';
+      const press = r.underPressure ? ' ⚠' : '';
+      btn.innerHTML = `<span class="${r.isCapital ? 'city-cap' : ''}">${r.tier}${cap}</span> · ${settlementFocusLabel(r.focus as SettlementFocus)} · ${r.pop}${press}`;
+      if (r.underPressure) btn.classList.add('city-pressure');
+      btn.addEventListener('click', () => this.game.centerOnSettlement(r.id));
+      el.appendChild(btn);
     }
   }
 
