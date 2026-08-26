@@ -1,5 +1,6 @@
 import { buildingSpriteKey } from '../SpriteMap';
 import { assetManifest } from './Registry';
+import { ASSET_PRODUCTION_STANDARDS } from './entries';
 import type { BuildingType } from '../../Entities/Building';
 
 const BUILDING_TYPES: BuildingType[] = [
@@ -46,5 +47,36 @@ export function runManifestGameplayChecks(): void {
     console.warn('[AssetManifest] gameplay coverage gaps:', missing.join(', '));
   } else {
     console.info('[AssetManifest] gameplay sprite coverage OK');
+  }
+
+  reportProductionReadiness();
+}
+
+function reportProductionReadiness(): void {
+  const units = assetManifest.all().filter((entry) => entry.category === 'unit');
+  const factionAssets = assetManifest
+    .all()
+    .filter((entry) => entry.faction === 'humans' || entry.faction === 'orcs');
+  const requiredDirections = ASSET_PRODUCTION_STANDARDS.animation.directions;
+
+  const staticUnits = units.filter(
+    (entry) =>
+      !entry.atlas ||
+      requiredDirections.some((direction) => !entry.animationDirections.includes(direction)),
+  );
+  const missingTeamMasks = factionAssets.filter((entry) => !entry.teamColorMask);
+  const missingAuthoredSize = assetManifest
+    .all()
+    .filter((entry) => entry.sourceWidth == null || entry.sourceHeight == null);
+
+  if (staticUnits.length || missingTeamMasks.length || missingAuthoredSize.length) {
+    console.info(
+      '[AssetManifest] prototype readiness:',
+      `${staticUnits.length} unit(s) await directional atlases,`,
+      `${missingTeamMasks.length} faction asset(s) await team-color masks,`,
+      `${missingAuthoredSize.length} asset(s) use runtime source dimensions`,
+    );
+  } else {
+    console.info('[AssetManifest] production metadata complete');
   }
 }

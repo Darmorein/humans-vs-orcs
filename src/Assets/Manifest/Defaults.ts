@@ -4,11 +4,19 @@ import type {
   AssetEntryInput,
   ElevationType,
   Footprint,
+  IsoDirection,
   RenderLayer,
+  SpriteSheetDefinition,
+  TeamColorMaskDefinition,
+  TileFootprint,
 } from './Types';
 
 function fp(width: number, height: number): Footprint {
   return { width, height };
+}
+
+function tiles(columns: number, rows: number): TileFootprint {
+  return { columns, rows };
 }
 
 interface CategoryDefaults {
@@ -16,6 +24,7 @@ interface CategoryDefaults {
   role: string | null;
   worldScale: number;
   footprint: Footprint;
+  footprintTiles: TileFootprint;
   collisionFootprint: Footprint;
   pivotX: number;
   pivotY: number;
@@ -23,9 +32,11 @@ interface CategoryDefaults {
   renderLayer: RenderLayer;
   blocksMovement: boolean;
   blocksVision: boolean;
-  teamColorMask: boolean;
+  teamColorMask: TeamColorMaskDefinition | null;
   animationStates: string[];
-  animationDirections: number;
+  animationDirections: IsoDirection[];
+  atlas: SpriteSheetDefinition | null;
+  productionStatus: AssetEntry['productionStatus'];
   tags: string[];
   terrainType: string | null;
   walkable: boolean | null;
@@ -42,6 +53,7 @@ const NEUTRAL_TERRAIN: CategoryDefaults = {
   role: null,
   worldScale: 1,
   footprint: fp(28, 28),
+  footprintTiles: tiles(1, 1),
   collisionFootprint: fp(28, 28),
   pivotX: 0.5,
   pivotY: 0.55,
@@ -49,9 +61,11 @@ const NEUTRAL_TERRAIN: CategoryDefaults = {
   renderLayer: 'terrain',
   blocksMovement: false,
   blocksVision: false,
-  teamColorMask: false,
+  teamColorMask: null,
   animationStates: ['idle'],
-  animationDirections: 1,
+  animationDirections: ['SE'],
+  atlas: null,
+  productionStatus: 'prototype',
   tags: ['terrain'],
   terrainType: null,
   walkable: true,
@@ -69,6 +83,7 @@ const BY_CATEGORY: Record<AssetCategory, CategoryDefaults> = {
     role: null,
     worldScale: 0.24,
     footprint: fp(24, 24),
+    footprintTiles: tiles(1, 1),
     collisionFootprint: fp(20, 20),
     pivotX: 0.5,
     pivotY: 0.92,
@@ -76,9 +91,11 @@ const BY_CATEGORY: Record<AssetCategory, CategoryDefaults> = {
     renderLayer: 'units',
     blocksMovement: false,
     blocksVision: false,
-    teamColorMask: false,
+    teamColorMask: null,
     animationStates: ['idle'],
-    animationDirections: 1,
+    animationDirections: ['SE'],
+    atlas: null,
+    productionStatus: 'prototype',
     tags: ['unit'],
     terrainType: null,
     walkable: null,
@@ -94,6 +111,7 @@ const BY_CATEGORY: Record<AssetCategory, CategoryDefaults> = {
     role: null,
     worldScale: 0.26,
     footprint: fp(80, 80),
+    footprintTiles: tiles(3, 3),
     collisionFootprint: fp(70, 70),
     pivotX: 0.5,
     pivotY: 0.88,
@@ -101,9 +119,11 @@ const BY_CATEGORY: Record<AssetCategory, CategoryDefaults> = {
     renderLayer: 'buildings',
     blocksMovement: true,
     blocksVision: true,
-    teamColorMask: false,
+    teamColorMask: null,
     animationStates: ['idle'],
-    animationDirections: 1,
+    animationDirections: ['SE'],
+    atlas: null,
+    productionStatus: 'prototype',
     tags: ['building'],
     terrainType: null,
     walkable: null,
@@ -120,6 +140,7 @@ const BY_CATEGORY: Record<AssetCategory, CategoryDefaults> = {
     role: 'prop',
     worldScale: 0.24,
     footprint: fp(20, 20),
+    footprintTiles: tiles(1, 1),
     collisionFootprint: fp(12, 12),
     pivotX: 0.5,
     pivotY: 0.9,
@@ -127,9 +148,11 @@ const BY_CATEGORY: Record<AssetCategory, CategoryDefaults> = {
     renderLayer: 'decoration',
     blocksMovement: false,
     blocksVision: false,
-    teamColorMask: false,
+    teamColorMask: null,
     animationStates: ['idle'],
-    animationDirections: 1,
+    animationDirections: ['SE'],
+    atlas: null,
+    productionStatus: 'prototype',
     tags: ['decoration'],
     terrainType: null,
     walkable: null,
@@ -145,6 +168,7 @@ const BY_CATEGORY: Record<AssetCategory, CategoryDefaults> = {
     role: 'gold',
     worldScale: 0.32,
     footprint: fp(40, 40),
+    footprintTiles: tiles(2, 2),
     collisionFootprint: fp(36, 36),
     pivotX: 0.5,
     pivotY: 0.82,
@@ -152,9 +176,11 @@ const BY_CATEGORY: Record<AssetCategory, CategoryDefaults> = {
     renderLayer: 'decoration',
     blocksMovement: true,
     blocksVision: false,
-    teamColorMask: false,
+    teamColorMask: null,
     animationStates: ['idle'],
-    animationDirections: 1,
+    animationDirections: ['SE'],
+    atlas: null,
+    productionStatus: 'prototype',
     tags: ['resource', 'gold'],
     terrainType: null,
     walkable: null,
@@ -170,6 +196,7 @@ const BY_CATEGORY: Record<AssetCategory, CategoryDefaults> = {
     role: 'icon',
     worldScale: 1,
     footprint: fp(32, 32),
+    footprintTiles: tiles(0, 0),
     collisionFootprint: fp(0, 0),
     pivotX: 0.5,
     pivotY: 0.5,
@@ -177,9 +204,11 @@ const BY_CATEGORY: Record<AssetCategory, CategoryDefaults> = {
     renderLayer: 'ui',
     blocksMovement: false,
     blocksVision: false,
-    teamColorMask: false,
+    teamColorMask: null,
     animationStates: ['idle'],
-    animationDirections: 1,
+    animationDirections: ['SE'],
+    atlas: null,
+    productionStatus: 'prototype',
     tags: ['ui'],
     terrainType: null,
     walkable: null,
@@ -195,6 +224,7 @@ const BY_CATEGORY: Record<AssetCategory, CategoryDefaults> = {
     role: 'fx',
     worldScale: 0.2,
     footprint: fp(16, 16),
+    footprintTiles: tiles(0, 0),
     collisionFootprint: fp(0, 0),
     pivotX: 0.5,
     pivotY: 0.5,
@@ -202,9 +232,11 @@ const BY_CATEGORY: Record<AssetCategory, CategoryDefaults> = {
     renderLayer: 'vfx',
     blocksMovement: false,
     blocksVision: false,
-    teamColorMask: false,
+    teamColorMask: null,
     animationStates: ['play'],
-    animationDirections: 1,
+    animationDirections: ['SE'],
+    atlas: null,
+    productionStatus: 'prototype',
     tags: ['vfx'],
     terrainType: null,
     walkable: null,
@@ -230,6 +262,7 @@ export function applyAssetDefaults(input: AssetEntryInput): AssetEntry {
     sourceHeight: input.sourceHeight ?? null,
     worldScale: input.worldScale ?? d.worldScale,
     footprint: input.footprint ?? { ...d.footprint },
+    footprintTiles: input.footprintTiles ?? { ...d.footprintTiles },
     collisionFootprint: input.collisionFootprint ?? { ...d.collisionFootprint },
     pivotX: input.pivotX ?? d.pivotX,
     pivotY: input.pivotY ?? d.pivotY,
@@ -239,7 +272,9 @@ export function applyAssetDefaults(input: AssetEntryInput): AssetEntry {
     blocksVision: input.blocksVision ?? d.blocksVision,
     teamColorMask: input.teamColorMask ?? d.teamColorMask,
     animationStates: input.animationStates ?? [...d.animationStates],
-    animationDirections: input.animationDirections ?? d.animationDirections,
+    animationDirections: input.animationDirections ?? [...d.animationDirections],
+    atlas: input.atlas ?? d.atlas,
+    productionStatus: input.productionStatus ?? d.productionStatus,
     tags: input.tags ?? [...d.tags],
     terrainType: input.terrainType !== undefined ? input.terrainType : d.terrainType,
     walkable: input.walkable !== undefined ? input.walkable : d.walkable,
