@@ -207,18 +207,27 @@ export class SelectionSystem {
       return;
     }
 
+    const hasCommandableUnits = this.selectedEntities.some(
+      (entity) =>
+        entity instanceof Unit &&
+        entity.unitType !== 'Worker' &&
+        entity.unitType !== 'Peon' &&
+        !entity.settlerGroupId,
+    );
+
     // With an army selected, battlefield taps are commands rather than deselection.
-    if (this.selectedEntities.length > 0) {
+    if (hasCommandableUnits) {
       this.issueOrderCommands(localId, worldPos, enemy, null, null);
       return;
     }
 
-    // Neutral resources remain inspectable when there is no current command context.
+    // Neutral resources remain inspectable when there is no army command context.
     if (resource) {
       this.replaceSelection([resource], entities);
       return;
     }
 
+    // Buildings/resources are inspection contexts, not move-order contexts.
     this.replaceSelection([], entities);
   }
 
