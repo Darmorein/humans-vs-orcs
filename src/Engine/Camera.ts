@@ -17,6 +17,12 @@ export class Camera {
     if (input.keys['KeyS'] || input.keys['ArrowDown']) this.y += this.moveSpeed * dt;
     if (input.keys['KeyA'] || input.keys['ArrowLeft']) this.x -= this.moveSpeed * dt;
     if (input.keys['KeyD'] || input.keys['ArrowRight']) this.x += this.moveSpeed * dt;
+
+    // Mobile/pen: drag the world directly under the finger.
+    if (input.panDeltaX || input.panDeltaY) {
+      this.x -= input.panDeltaX;
+      this.y -= input.panDeltaY;
+    }
   }
 
   public resize(width: number, height: number) {
