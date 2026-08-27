@@ -1,0 +1,485 @@
+/* Second-pass interaction layer. Loaded after the base HUD stylesheet. */
+
+#game-canvas {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Keep the DOM command bar visually authoritative over the legacy canvas strip. */
+#command-bar {
+  background: linear-gradient(180deg, rgba(15, 20, 14, 0.98), rgba(18, 24, 16, 0.94));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+}
+
+#command-bar,
+.hud-sheet,
+.floating-panel,
+#ui-container,
+.hud-placement-bar {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Contextual city management ------------------------------------------------ */
+
+#action-buttons.is-city-actions {
+  padding: 0;
+  overflow: visible;
+  align-items: stretch;
+}
+
+.hud-city-sheet {
+  width: min(720px, 64vw);
+  max-height: min(54vh, 500px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(215, 199, 154, 0.2);
+  border-radius: 14px;
+  background: rgba(18, 23, 16, 0.96);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.34);
+  pointer-events: auto;
+}
+
+.hud-city-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.hud-city-sheet-head > div {
+  min-width: 0;
+}
+
+.hud-city-sheet-head small {
+  display: block;
+  margin-bottom: 2px;
+  color: #9f987e;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.hud-city-sheet-head strong {
+  display: block;
+  overflow: hidden;
+  color: #f0e5c8;
+  font: 700 16px Georgia, 'Times New Roman', serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-city-quickstats {
+  display: flex;
+  max-width: 56%;
+  gap: 6px;
+  overflow: hidden;
+  color: #c7bfa5;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.hud-city-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.hud-city-tab {
+  min-height: 44px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: #a9a18c;
+  cursor: pointer;
+  font: 800 11px/1 'Segoe UI', sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.hud-city-tab:hover,
+.hud-city-tab:focus-visible {
+  background: rgba(255, 255, 255, 0.05);
+  color: #eee6d1;
+  outline: none;
+}
+
+.hud-city-tab.is-active {
+  border-color: rgba(214, 183, 105, 0.32);
+  background: rgba(118, 93, 42, 0.28);
+  color: #f2dfad;
+}
+
+.hud-city-pane {
+  display: none;
+  min-height: 96px;
+  max-height: min(38vh, 350px);
+  padding: 10px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.hud-city-pane.is-active {
+  display: grid;
+}
+
+.hud-city-pane > .action-btn,
+.hud-city-pane > .focus-select,
+.hud-city-pane > .queue-row,
+.hud-city-pane > .queue-hint {
+  min-width: 0;
+  max-width: none;
+  width: 100%;
+  margin: 0;
+}
+
+.hud-city-pane > .action-btn {
+  min-height: 54px;
+  padding: 9px 12px;
+  text-align: left;
+  white-space: normal;
+}
+
+.hud-city-pane[data-pane='develop'] > .action-btn,
+.hud-city-pane[data-pane='army'] > .action-btn {
+  border-color: rgba(205, 190, 150, 0.18);
+  background: linear-gradient(180deg, rgba(60, 69, 51, 0.92), rgba(43, 50, 38, 0.92));
+}
+
+.hud-city-pane[data-pane='develop'] > .action-btn[data-intent='strategic'] {
+  border-color: rgba(222, 179, 91, 0.42);
+  background: linear-gradient(180deg, rgba(93, 72, 34, 0.94), rgba(67, 51, 27, 0.94));
+}
+
+.hud-city-pane[data-pane='army'] > .action-btn {
+  border-color: rgba(166, 94, 79, 0.35);
+  background: linear-gradient(180deg, rgba(83, 51, 43, 0.94), rgba(55, 38, 34, 0.94));
+}
+
+.hud-city-pane[data-pane='govern'] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.hud-city-pane .focus-select {
+  min-height: 50px;
+  font-size: 14px;
+}
+
+.hud-city-pane .queue-row,
+.hud-city-pane .queue-hint {
+  grid-column: 1 / -1;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.hud-empty-pane {
+  grid-column: 1 / -1;
+  padding: 18px;
+  color: #8e8877;
+  font-size: 12px;
+  text-align: center;
+}
+
+#selection-info.is-city-summary .muted {
+  display: none;
+}
+
+#selection-info.is-city-summary p {
+  margin: 3px 0;
+}
+
+#selection-info.is-city-summary p:nth-of-type(n + 6) {
+  display: none;
+}
+
+/* Formation picker --------------------------------------------------------- */
+
+#action-buttons.is-formation-actions {
+  position: relative;
+  overflow: visible;
+  align-items: flex-end;
+}
+
+.hud-formation-control {
+  position: relative;
+  pointer-events: auto;
+}
+
+.hud-formation-trigger {
+  min-width: 138px;
+  min-height: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid rgba(210, 193, 145, 0.28);
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: rgba(37, 46, 34, 0.96);
+  color: #efe5ca;
+  cursor: pointer;
+}
+
+.hud-formation-trigger span {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.hud-formation-trigger small {
+  color: #9e9782;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hud-formation-trigger strong {
+  margin-top: 2px;
+  font-size: 12px;
+}
+
+.hud-formation-trigger::after {
+  content: '▴';
+  color: #b9ad8d;
+  font-size: 12px;
+}
+
+.hud-formation-control.is-open .hud-formation-trigger::after {
+  content: '▾';
+}
+
+.hud-formation-picker {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 18;
+  width: min(330px, calc(100vw - 24px));
+  display: none;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid rgba(215, 199, 154, 0.24);
+  border-radius: 12px;
+  background: rgba(16, 21, 15, 0.98);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.42);
+}
+
+.hud-formation-control.is-open .hud-formation-picker {
+  display: grid;
+}
+
+.hud-formation-picker .action-btn {
+  min-width: 0;
+  min-height: 50px;
+  padding: 8px 9px;
+  border-color: rgba(205, 190, 150, 0.17);
+  background: rgba(55, 65, 49, 0.94);
+  white-space: normal;
+}
+
+.hud-formation-picker .action-btn:has(+ *) {
+  margin: 0;
+}
+
+/* Placement confirmation -------------------------------------------------- */
+
+.hud-placement-bar {
+  position: fixed;
+  left: 50%;
+  bottom: calc(14px + env(safe-area-inset-bottom));
+  z-index: 28;
+  width: min(520px, calc(100vw - 24px));
+  min-height: 64px;
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 9px 8px 13px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(220, 199, 139, 0.26);
+  border-radius: 14px;
+  background: rgba(17, 22, 15, 0.98);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  color: #efe7d2;
+  pointer-events: auto;
+}
+
+.hud-placement-bar.is-open {
+  display: flex;
+}
+
+.hud-placement-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.hud-placement-copy small,
+.hud-placement-copy strong {
+  display: block;
+}
+
+.hud-placement-copy small {
+  margin-bottom: 3px;
+  color: #9e9782;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.hud-placement-copy strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-placement-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.hud-placement-actions button {
+  min-width: 74px;
+  min-height: 48px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: #394335;
+  color: #eee7d4;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.hud-placement-actions button[data-placement='confirm'] {
+  border-color: rgba(174, 205, 119, 0.42);
+  background: #455b35;
+  color: #f2f6e8;
+}
+
+.hud-placement-actions button:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+/* Mobile ------------------------------------------------------------------ */
+
+@media (pointer: coarse) {
+  button,
+  select {
+    touch-action: manipulation;
+  }
+
+  .hud-city-tab,
+  .hud-formation-trigger,
+  .hud-formation-picker .action-btn,
+  .hud-city-pane > .action-btn {
+    min-height: 50px;
+  }
+
+  #selection-info .muted {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .hud-city-sheet {
+    width: min(680px, calc(100vw - 20px));
+    max-height: 49vh;
+  }
+
+  .hud-city-pane {
+    grid-template-columns: repeat(2, minmax(145px, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .hud-city-sheet {
+    width: 100%;
+    max-height: 48vh;
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 14px 14px 0 0;
+  }
+
+  .hud-city-sheet-head {
+    padding: 9px 12px 6px;
+  }
+
+  .hud-city-quickstats {
+    display: none;
+  }
+
+  .hud-city-tabs {
+    padding: 5px 7px;
+  }
+
+  .hud-city-pane {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-height: 31vh;
+    padding: 7px;
+  }
+
+  .hud-city-pane > .action-btn {
+    min-height: 52px;
+    padding: 8px;
+    font-size: 11px;
+  }
+
+  #action-buttons.is-city-actions {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 16;
+    width: 100%;
+  }
+
+  #ui-container:has(#action-buttons.is-city-actions) {
+    pointer-events: none;
+  }
+
+  #ui-container:has(#action-buttons.is-city-actions) #selection-info {
+    display: none;
+  }
+
+  .hud-placement-bar {
+    bottom: calc(8px + env(safe-area-inset-bottom));
+    width: calc(100vw - 16px);
+  }
+}
+
+@media (max-height: 520px) and (orientation: landscape) {
+  .hud-city-sheet {
+    max-height: 58vh;
+  }
+
+  .hud-city-sheet-head {
+    padding: 7px 10px 5px;
+  }
+
+  .hud-city-tab {
+    min-height: 38px;
+  }
+
+  .hud-city-pane {
+    max-height: 36vh;
+    padding: 6px;
+  }
+
+  .hud-city-pane > .action-btn {
+    min-height: 46px;
+  }
+
+  .hud-placement-bar {
+    min-height: 56px;
+  }
+}
