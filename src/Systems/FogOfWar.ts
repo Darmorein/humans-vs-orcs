@@ -6,12 +6,10 @@ import { ResourceNode } from '../Entities/ResourceNode';
 import type { GameMap } from '../Map/GameMap';
 import type { InfluenceMap } from '../Map/InfluenceMap';
 import { MatchState } from '../Players/MatchState';
-import type { FactionId } from '../Players/Types';
 
 /**
- * Classic fog for units / enemy awareness.
- * Owned territory reveals *terrain & resources* without granting combat vision
- * (does not mark cells explored / visible).
+ * Classic fog of war: vision from owned units/buildings only.
+ * Explored = once seen; visible = currently in vision range.
  */
 export class FogOfWar {
   public readonly cellSize = 48;
@@ -20,8 +18,6 @@ export class FogOfWar {
   private explored: Uint8Array;
   private visible: Uint8Array;
   private viewerPlayerId: string | null = null;
-  private viewerFactionId: FactionId | null = null;
-  private influence: InfluenceMap | null = null;
 
   constructor(mapWidth: number, mapHeight: number) {
     this.cols = Math.ceil(mapWidth / this.cellSize);
@@ -30,21 +26,17 @@ export class FogOfWar {
     this.visible = new Uint8Array(this.cols * this.rows);
   }
 
+  /**
+   * @param influence Ignored — kept for call-site compatibility after territory experiments.
+   */
   public update(
     entities: Entity[],
     gameMap?: GameMap,
     viewerPlayerId?: string,
-    influence?: InfluenceMap | null,
+    _influence?: InfluenceMap | null,
   ) {
     this.viewerPlayerId =
       viewerPlayerId ?? MatchState.current?.localPlayerId ?? this.viewerPlayerId;
-    this.influence = influence ?? this.influence ?? null;
-
-    const viewer = this.viewerPlayerId
-      ? MatchState.current?.getPlayer(this.viewerPlayerId)
-      : null;
-    this.viewerFactionId = viewer?.factionId ?? null;
-
     this.visible.fill(0);
     if (!this.viewerPlayerId) return;
 
@@ -66,33 +58,22 @@ export class FogOfWar {
     return i >= 0 && this.explored[i] === 1;
   }
 
-  /**
-   * Solid owned territory — shows ground + resource deposits.
-   * Does not equal fog exploration (enemy armies stay hidden).
-   */
-  public isOwnedTerritoryAt(x: number, y: number): boolean {
-    if (!this.influence || !this.viewerFactionId) return false;
-    return this.influence.getControlAt(x, y) === this.viewerFactionId;
-  }
-
-  /** Terrain / resource knowledge: explored by vision OR owned land. */
+  /** Terrain / decoration knowledge — classic: explored by vision only. */
   public knowsTerrainAt(x: number, y: number): boolean {
-    return this.isExploredAt(x, y) || this.isOwnedTerritoryAt(x, y);
+    return this.isExploredAt(x, y);
   }
 
   public canSeeEntity(entity: Entity): boolean {
     if (entity.isDead) return false;
-    // Resources: visible on explored OR owned territory (not combat vision).
-    if (entity instanceof ResourceNode) return this.knowsTerrainAt(entity.x, entity.y);
+    if (entity instanceof ResourceNode) return this.isExploredAt(entity.x, entity.y);
     if (this.viewerPlayerId && entity.ownerPlayerId === this.viewerPlayerId) return true;
-    // Enemy/neutral buildings still need classic exploration — territory ≠ scout.
     if (entity instanceof Building) return this.isExploredAt(entity.x, entity.y);
     return this.isVisibleAt(entity.x, entity.y);
   }
 
   public canTargetEntity(entity: Entity): boolean {
     if (entity.isDead) return false;
-    if (entity instanceof ResourceNode) return this.knowsTerrainAt(entity.x, entity.y);
+    if (entity instanceof ResourceNode) return this.isExploredAt(entity.x, entity.y);
     if (this.viewerPlayerId && entity.ownerPlayerId === this.viewerPlayerId) return true;
     return this.isVisibleAt(entity.x, entity.y);
   }
@@ -121,25 +102,12 @@ export class FogOfWar {
         const i = cy * this.cols + cx;
         if (this.visible[i] === 1) continue;
 
-        const wx = cx * this.cellSize + this.cellSize * 0.5;
-        const wy = cy * this.cellSize + this.cellSize * 0.5;
-        const owned =
-          this.influence && this.viewerFactionId
-            ? this.influence.getControlAt(wx, wy) === this.viewerFactionId
-            : false;
-
-        // Owned land: show terrain/resources; do not clear fog for unit vision.
-        if (owned && this.explored[i] !== 1) {
-          continue;
-        }
-
-        const p0 = camera.worldToScreen(cx * this.cellSize, cy * this.cellSize);
-        const p1 = camera.worldToScreen(cx * this.cellSize + this.cellSize, cy * this.cellSize);
-        const p2 = camera.worldToScreen(
-          cx * this.cellSize + this.cellSize,
-          cy * this.cellSize + this.cellSize,
-        );
-        const p3 = camera.worldToScreen(cx * this.cellSize, cy * this.cellSize + this.cellSize);
+        const wx = cx * this.cellSize;
+        const wy = cy * this.cellSize;
+        const p0 = camera.worldToScreen(wx, wy);
+        const p1 = camera.worldToScreen(wx + this.cellSize, wy);
+        const p2 = camera.worldToScreen(wx + this.cellSize, wy + this.cellSize);
+        const p3 = camera.worldToScreen(wx, wy + this.cellSize);
 
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y);
@@ -147,11 +115,7 @@ export class FogOfWar {
         ctx.lineTo(p2.x, p2.y);
         ctx.lineTo(p3.x, p3.y);
         ctx.closePath();
-        if (this.explored[i] === 1) {
-          ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
-        } else {
-          ctx.fillStyle = '#030503';
-        }
+        ctx.fillStyle = this.explored[i] === 1 ? 'rgba(0, 0, 0, 0.55)' : '#030503';
         ctx.fill();
       }
     }

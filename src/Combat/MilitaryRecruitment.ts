@@ -2,7 +2,6 @@ import type { Entity } from '../Entities/Entity';
 import { Building, isMainBuilding } from '../Entities/Building';
 import { Unit } from '../Entities/Unit';
 import type { MatchState } from '../Players/MatchState';
-import { FACTIONS } from '../Players/Types';
 import type { SettlementSystem } from '../Settlement/SettlementSystem';
 import type { GameRng } from '../Sim/GameRng';
 import { spawnUnitRegistered } from '../Sim/spawnUnit';
@@ -25,6 +24,26 @@ export function getNextRecruitJobSeq(): number {
 }
 export function setNextRecruitJobSeq(n: number) {
   nextJobSeq = Math.max(1, Math.floor(n));
+}
+
+function isBarracks(type: Building['buildingType']): boolean {
+  return type === 'Barracks' || type === 'OrcBarracks';
+}
+
+/** Whether this constructed building may train the given squad template. */
+export function buildingCanProduce(building: Building, template: SquadTemplate): boolean {
+  if (!building.isConstructed || building.isDead) return false;
+  if (template.requiredCapability === 'advanced') return isBarracks(building.buildingType);
+  return isMainBuilding(building.buildingType) || isBarracks(building.buildingType);
+}
+
+/** Spawn just outside the building footprint (south-east of iso front). */
+function musterAnchorOutside(b: Building): { x: number; y: number } {
+  const dist = b.radius + 36;
+  return {
+    x: b.x + dist * 0.75,
+    y: b.y + dist * 0.75,
+  };
 }
 
 export type MilitaryJobKind = 'recruit' | 'reinforce';
@@ -62,7 +81,7 @@ export interface MilitaryJobSnapshot {
 
 /**
  * Squad-centric military production.
- * Capital TC musters basic squads; Barracks add queue slots + faster train.
+ * Each Town Hall / Barracks trains into its own queue slot and spawns at that building.
  */
 export class MilitaryRecruitmentSystem {
   private jobs: MilitaryJob[] = [];
@@ -111,6 +130,7 @@ export class MilitaryRecruitmentSystem {
     entities: Entity[],
     match: MatchState,
     settlements: SettlementSystem,
+    buildingId?: number,
   ): string | null {
     const player = match.getPlayer(playerId);
     const template = getSquadTemplate(templateId);
@@ -119,11 +139,19 @@ export class MilitaryRecruitmentSystem {
     if (player.pop + template.manpowerCost > player.maxPop) {
       return `Need ${player.pop + template.manpowerCost - player.maxPop} more housing`;
     }
-    const muster = this.findMusterBuilding(playerId, entities, template);
+    const muster = this.resolveMusterBuilding(playerId, entities, template, buildingId);
     if (!muster) {
+      if (buildingId != null) {
+        return template.requiredCapability === 'advanced'
+          ? 'This building cannot train that squad'
+          : 'Select Town Hall or Barracks';
+      }
       return template.requiredCapability === 'advanced'
         ? 'Requires Barracks'
-        : 'No capital muster site';
+        : 'No muster site';
+    }
+    if (this.jobs.some((j) => j.buildingId === muster.id)) {
+      return 'This building is busy';
     }
     if (player.gold < template.treasuryCost) {
       return `Need ${template.treasuryCost - Math.floor(player.gold)} more Treasury`;
@@ -148,6 +176,7 @@ export class MilitaryRecruitmentSystem {
     entities: Entity[];
     match: MatchState;
     settlements: SettlementSystem;
+    buildingId?: number;
   }): string | null {
     const why = this.recruitBlockReason(
       args.playerId,
@@ -155,11 +184,17 @@ export class MilitaryRecruitmentSystem {
       args.entities,
       args.match,
       args.settlements,
+      args.buildingId,
     );
     if (why) return null;
     const player = args.match.getPlayer(args.playerId)!;
     const template = getSquadTemplate(args.templateId)!;
-    const muster = this.findMusterBuilding(args.playerId, args.entities, template)!;
+    const muster = this.resolveMusterBuilding(
+      args.playerId,
+      args.entities,
+      template,
+      args.buildingId,
+    )!;
     const settlementId = args.settlements.draftForRecruitment(
       args.playerId,
       muster.x,
@@ -181,7 +216,7 @@ export class MilitaryRecruitmentSystem {
       squadId: null,
       membersNeeded: template.targetSize,
       progress: 0,
-      trainTime: this.effectiveTrainTime(template, args.playerId, args.entities),
+      trainTime: this.effectiveTrainTime(template, muster),
       displayName,
     });
     void player;
@@ -209,11 +244,14 @@ export class MilitaryRecruitmentSystem {
     }
     const template = this.templateForSquad(squad);
     if (!template) return 'Unknown squad type';
-    const muster = this.findMusterBuilding(playerId, entities, template);
+    const muster = this.resolveMusterBuilding(playerId, entities, template);
     if (!muster) {
       return template.requiredCapability === 'advanced'
         ? 'Requires Barracks'
-        : 'No capital muster site';
+        : 'No muster site';
+    }
+    if (this.jobs.some((j) => j.buildingId === muster.id)) {
+      return 'Muster building is busy';
     }
     const cost = reinforceMemberTreasuryCost(template, player.factionId) * missing;
     if (player.gold < cost) {
@@ -255,7 +293,7 @@ export class MilitaryRecruitmentSystem {
     const squad = args.squads.get(args.squadId)!;
     const template = this.templateForSquad(squad)!;
     const missing = Math.max(0, (squad.targetSize || squad.maxSize) - squad.memberIds.length);
-    const muster = this.findMusterBuilding(args.playerId, args.entities, template)!;
+    const muster = this.resolveMusterBuilding(args.playerId, args.entities, template)!;
     const cost = reinforceMemberTreasuryCost(template, player.factionId) * missing;
     const settlementId = args.settlements.draftForRecruitment(
       args.playerId,
@@ -435,7 +473,7 @@ export class MilitaryRecruitmentSystem {
     const b = entities.find(
       (e): e is Building => e instanceof Building && e.id === buildingId && !e.isDead,
     );
-    if (b) return { x: b.x + 40, y: b.y + 50 };
+    if (b) return musterAnchorOutside(b);
     const main = entities.find(
       (e): e is Building =>
         e instanceof Building &&
@@ -443,69 +481,71 @@ export class MilitaryRecruitmentSystem {
         e.ownerPlayerId === playerId &&
         isMainBuilding(e.buildingType),
     );
-    if (main) return { x: main.x + 50, y: main.y + 40 };
+    if (main) return musterAnchorOutside(main);
     return { x: 0, y: 0 };
   }
 
   /**
-   * Prefer Barracks when present; otherwise Capital TC for basic templates.
+   * Explicit buildingId when the player queued from a selected Town Hall / Barracks.
+   * Otherwise pick an idle site that can produce the template (AI / reinforce).
    */
-  private findMusterBuilding(
+  private resolveMusterBuilding(
+    playerId: string,
+    entities: Entity[],
+    template: SquadTemplate,
+    buildingId?: number,
+  ): Building | null {
+    if (buildingId != null) {
+      const b = entities.find(
+        (e): e is Building => e instanceof Building && e.id === buildingId && !e.isDead,
+      );
+      if (!b || b.ownerPlayerId !== playerId || !b.isConstructed) return null;
+      if (!buildingCanProduce(b, template)) return null;
+      return b;
+    }
+    return this.findIdleMusterBuilding(playerId, entities, template);
+  }
+
+  private findIdleMusterBuilding(
     playerId: string,
     entities: Entity[],
     template: SquadTemplate,
   ): Building | null {
-    const barracks = this.findBarracks(playerId, entities);
-    if (barracks) return barracks;
-    if (template.requiredCapability === 'advanced') return null;
-    return this.findCapital(playerId, entities);
+    const sites = this.listMusterBuildings(playerId, entities).filter((b) =>
+      buildingCanProduce(b, template),
+    );
+    const idle = sites.find((b) => !this.jobs.some((j) => j.buildingId === b.id));
+    return idle ?? sites[0] ?? null;
   }
 
-  private findCapital(playerId: string, entities: Entity[]): Building | null {
-    const player = FACTIONS;
+  private listMusterBuildings(playerId: string, entities: Entity[]): Building[] {
+    const out: Building[] = [];
     for (const e of entities) {
       if (!(e instanceof Building) || e.isDead || !e.isConstructed) continue;
       if (e.ownerPlayerId !== playerId) continue;
-      if (isMainBuilding(e.buildingType)) return e;
+      if (isMainBuilding(e.buildingType) || isBarracks(e.buildingType)) {
+        out.push(e);
+      }
     }
-    void player;
-    return null;
+    out.sort((a, b) => {
+      const aB = isBarracks(a.buildingType) ? 0 : 1;
+      const bB = isBarracks(b.buildingType) ? 0 : 1;
+      if (aB !== bB) return aB - bB;
+      return a.id - b.id;
+    });
+    return out;
   }
 
-  private findBarracks(playerId: string, entities: Entity[]): Building | null {
-    for (const e of entities) {
-      if (!(e instanceof Building) || e.isDead || !e.isConstructed) continue;
-      if (e.ownerPlayerId !== playerId) continue;
-      if (e.buildingType === 'Barracks' || e.buildingType === 'OrcBarracks') return e;
-    }
-    return null;
-  }
-
-  private countBarracks(playerId: string, entities: Entity[]): number {
-    let n = 0;
-    for (const e of entities) {
-      if (!(e instanceof Building) || e.isDead || !e.isConstructed) continue;
-      if (e.ownerPlayerId !== playerId) continue;
-      if (e.buildingType === 'Barracks' || e.buildingType === 'OrcBarracks') n++;
-    }
-    return n;
-  }
-
-  /** Capital grants 1 basic slot; each Barracks grants +1. */
+  /** Each Town Hall / Barracks grants 1 concurrent training slot. */
   private queueCapacity(playerId: string, entities: Entity[]): number {
-    const capital = this.findCapital(playerId, entities);
-    const barracks = this.countBarracks(playerId, entities);
-    return (capital ? 1 : 0) + barracks;
+    return Math.max(1, this.listMusterBuildings(playerId, entities).length);
   }
 
-  /** Barracks accelerate basic production (~28% faster). */
-  private effectiveTrainTime(
-    template: SquadTemplate,
-    playerId: string,
-    entities: Entity[],
-  ): number {
-    const hasBarracks = this.countBarracks(playerId, entities) > 0;
-    if (hasBarracks) return Math.max(6, template.trainTime * 0.72);
+  /** Training at a Barracks is faster; Town Hall uses base time. */
+  private effectiveTrainTime(template: SquadTemplate, muster: Building): number {
+    if (isBarracks(muster.buildingType)) {
+      return Math.max(6, template.trainTime * 0.72);
+    }
     return template.trainTime;
   }
 

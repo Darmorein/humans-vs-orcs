@@ -13,9 +13,13 @@ import {
 } from './Squad';
 import { FORMATION_DEFS } from './FormationDefs';
 import {
-  attackRingPoint,
+  beginSquadEngage,
+  beginSquadHold,
   beginSquadMarch,
+  endSquadEngage,
   endSquadMarch,
+  steerSquadEngage,
+  steerSquadHold,
   steerSquadMarch,
 } from './SquadMarch';
 import {
@@ -124,6 +128,11 @@ export class SquadSystem {
       squad.closedToAutoJoin = row.closedToAutoJoin ?? false;
       squad.lastMemberCount = row.memberIds.length;
       squad.lastLeaderId = row.leaderId;
+      // Transient march/engage state is not serialized — reset to idle on load.
+      squad.orderMode = row.routing ? 'rout' : 'idle';
+      squad.marchActive = false;
+      squad.engageActive = false;
+      squad.primaryTargetId = null;
       this.squads.set(squad.id, squad);
     }
   }
@@ -260,27 +269,48 @@ export class SquadSystem {
       this.applyRoutState(squad, members);
       this.recomputeStats(squad, members);
       if (squad.routing) {
-        endSquadMarch(squad, members);
+        squad.orderMode = 'rout';
+        endSquadMarch(squad, members, gameMap, entities);
+        endSquadEngage(squad, members);
         this.driveFlee(squad, members, entities, rng);
+      } else if (squad.orderMode === 'rout') {
+        squad.orderMode = 'idle';
       }
     }
   }
 
   /**
-   * Advance shared squad anchors / live formation slots.
+   * Advance shared squad anchors / combat / hold slots.
    * Call before Unit.update so members seek refreshed destinations the same tick.
    */
   public steerMarches(dt: number, ctx: SquadUpdateContext) {
     const { entities, gameMap } = ctx;
     const unitsById = this.unitMap(entities);
     for (const squad of this.all()) {
-      if (!squad.marchActive || squad.routing) continue;
+      if (squad.routing) continue;
       const members = this.membersOf(squad, unitsById);
       if (members.length === 0) {
-        endSquadMarch(squad, members);
+        if (squad.marchActive) endSquadMarch(squad, members, gameMap, entities);
+        if (squad.engageActive) endSquadEngage(squad, members);
         continue;
       }
-      steerSquadMarch(squad, members, dt, gameMap, entities);
+      if (squad.marchActive) {
+        steerSquadMarch(squad, members, dt, gameMap, entities);
+      } else if (squad.engageActive) {
+        steerSquadEngage(squad, members, dt, gameMap, entities);
+      } else if (squad.orderMode === 'hold' || FORMATION_DEFS[squad.formation].holdGround) {
+        if (squad.orderMode !== 'hold') {
+          beginSquadHold(squad, members, gameMap, entities);
+        } else {
+          steerSquadHold(squad, members, dt, gameMap, entities);
+        }
+      } else {
+        for (const u of members) {
+          if (u.squadOrderMode !== 'none' && u.squadOrderMode !== 'idle') {
+            u.squadOrderMode = 'none';
+          }
+        }
+      }
     }
   }
 
@@ -289,6 +319,7 @@ export class SquadSystem {
     const units = this.livingMembers(squad, entities);
     if (units.length === 0) return;
 
+    endSquadEngage(squad, units);
     const center = squad.centroid(this.unitMap(entities));
     const dx = center ? x - center.x : 0;
     const dy = center ? y - center.y : 1;
@@ -297,7 +328,7 @@ export class SquadSystem {
     beginSquadMarch(squad, x, y, units, gameMap, entities);
   }
 
-  public orderAttack(squad: Squad, target: Entity, entities: Entity[]) {
+  public orderAttack(squad: Squad, target: Entity, entities: Entity[], gameMap?: GameMap) {
     if (squad.routing) return;
     const units = this.livingMembers(squad, entities);
     if (units.length === 0) return;
@@ -305,25 +336,7 @@ export class SquadSystem {
     const center = squad.centroid(this.unitMap(entities));
     if (center) this.setFacing(squad, target.x - center.x, target.y - center.y);
 
-    endSquadMarch(squad, units);
-    const fx = FORMATION_DEFS[squad.formation];
-    const ringR = Math.max(target.radius + 28, 40);
-    units.sort((a, b) => {
-      if (a.id === squad.leaderId) return -1;
-      if (b.id === squad.leaderId) return 1;
-      return a.id - b.id;
-    });
-    for (let i = 0; i < units.length; i++) {
-      const u = units[i]!;
-      u.attackCommand(target);
-      // Spread approach points so the whole squad does not path to one pixel.
-      const ring = attackRingPoint(target.x, target.y, i, units.length, ringR);
-      u.approachX = ring.x;
-      u.approachY = ring.y;
-      u.facingX = squad.facingX;
-      u.facingY = squad.facingY;
-      if (fx.id === 'charge') u.chargeStrikeReady = true;
-    }
+    beginSquadEngage(squad, target, units, gameMap, entities);
   }
 
   public setFormation(
@@ -335,6 +348,13 @@ export class SquadSystem {
     if (squad.routing) return;
     squad.formation = formation;
     if (!entities) return;
+    const units = this.livingMembers(squad, entities);
+    if (units.length === 0) return;
+    if (FORMATION_DEFS[formation].holdGround) {
+      endSquadEngage(squad, units);
+      beginSquadHold(squad, units, gameMap, entities);
+      return;
+    }
     const center = squad.centroid(this.unitMap(entities));
     if (!center) return;
     this.orderMove(squad, center.x, center.y, entities, gameMap);
@@ -525,7 +545,8 @@ export class SquadSystem {
       u.squadAttackMul = moraleMul * xpBonus;
       u.squadSpeedMul =
         (0.92 + morale01 * 0.16) * fx.speedMul * (squad.routing ? 1.25 : 1);
-      u.holdGround = fx.holdGround && !squad.routing;
+      u.holdGround =
+        (fx.holdGround || squad.orderMode === 'hold') && !squad.routing && !squad.engageActive;
       u.formationMeleeTakenMul = fx.meleeTakenMul;
       u.formationRangedTakenMul = fx.rangedTakenMul;
       u.formationFrontalDefense = fx.frontalDefense;

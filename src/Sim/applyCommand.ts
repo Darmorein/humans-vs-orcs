@@ -112,7 +112,7 @@ function applyAttack(
   if (cmd.squadId) {
     const squad = world.squads.get(cmd.squadId);
     if (!squad || squad.ownerPlayerId !== cmd.playerId) return false;
-    world.squads.orderAttack(squad, target, world.entities);
+    world.squads.orderAttack(squad, target, world.entities, world.gameMap);
     return true;
   }
 
@@ -250,6 +250,7 @@ function applyRecruitSquad(
     world.recruitment.enqueueRecruit({
       playerId: cmd.playerId,
       templateId: cmd.templateId,
+      buildingId: cmd.buildingId,
       entities: world.entities,
       match: world.match,
       settlements: world.settlements,

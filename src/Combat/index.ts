@@ -2,7 +2,7 @@
  * Squad-centric combat control — orders to groups, agents still simulate.
  */
 export { Squad, isCombatUnitType, squadDisplayName, SQUAD_MAX_SIZE } from './Squad';
-export type { CombatUnitType } from './Squad';
+export type { CombatUnitType, SquadOrderMode } from './Squad';
 export type { SquadFormation } from './FormationDefs';
 export {
   ALL_FORMATIONS,
@@ -12,6 +12,13 @@ export {
 export { SquadSystem } from './SquadSystem';
 export type { SquadUpdateContext } from './SquadSystem';
 export { formationOffsets, orientOffsets } from './Formations';
+export {
+  FORMATION_BASE_SPACING,
+  CHOKE_COMPRESS_MUL,
+  COMBAT_LEASH,
+  findNearestValidFormationPoint,
+  isValidFormationPoint,
+} from './SquadMarch';
 export {
   allSquadTemplates,
   getSquadTemplate,

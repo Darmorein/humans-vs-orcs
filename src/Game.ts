@@ -14,6 +14,15 @@ import { SelectionSystem } from './Systems/SelectionSystem';
 import { UIManager } from './UI/UIManager';
 import { FogOfWar } from './Systems/FogOfWar';
 import { drawIsoBox, drawIsoEllipse, isoDepth } from './Engine/Iso';
+
+/** Iso painter's algorithm depth. Buildings use front footprint edge, not sprite center. */
+function entityIsoSortDepth(entity: Entity): number {
+  if (entity instanceof Building) {
+    const front = Math.max(entity.radius * 0.92, (entity.height || entity.radius * 2) * 0.45);
+    return isoDepth(entity.x, entity.y + front);
+  }
+  return isoDepth(entity.x, entity.y);
+}
 import { assets } from './Assets/Assets';
 import { createDefaultMatch, createPvpMatch, MatchState, type PlayerState } from './Players/MatchState';
 import type { PlayerController } from './Players/PlayerController';
@@ -711,11 +720,12 @@ export class Game {
     });
   }
 
-  public recruitSquad(templateId: string) {
+  public recruitSquad(templateId: string, buildingId: number) {
     this.submitCommand({
       type: 'recruitSquad',
       playerId: this.match.localPlayerId,
       templateId,
+      buildingId,
     });
   }
 
@@ -727,13 +737,14 @@ export class Game {
     });
   }
 
-  public recruitSquadBlockReason(templateId: string): string | null {
+  public recruitSquadBlockReason(templateId: string, buildingId: number): string | null {
     return this.recruitment.recruitBlockReason(
       this.match.localPlayerId,
       templateId,
       this.entities,
       this.match,
       this.settlementSystem,
+      buildingId,
     );
   }
 
@@ -1379,6 +1390,12 @@ export class Game {
   }
 
   private resolveUnitCollisions() {
+    // Cache buildings once — avoid O(units × entities) type checks every pair.
+    const buildings: Building[] = [];
+    for (const e of this.entities) {
+      if (e instanceof Building && !e.isDead) buildings.push(e);
+    }
+
     for (let i = 0; i < this.entities.length; i++) {
       const e1 = this.entities[i]!;
       if (!(e1 instanceof Unit) || e1.isDead) continue;
@@ -1392,22 +1409,22 @@ export class Game {
         const dy = e1.y - e2.y;
         const distSq = dx * dx + dy * dy;
         const sameOwner = e1.ownerPlayerId && e1.ownerPlayerId === e2.ownerPlayerId;
-        const softScale = sameOwner ? 0.72 : 0.88;
+        const sameSquad =
+          !!e1.squadId && e1.squadId === e2.squadId && e1.followSquadMarch && e2.followSquadMarch;
+        const softScale = sameSquad ? 0.42 : sameOwner ? 0.72 : 0.88;
         const minDist = (e1.radius + e2.radius) * softScale;
         if (distSq >= minDist * minDist) continue;
-        // Coincident stack — deterministic angular nudge (was skipped forever).
         if (distSq <= 1e-6) {
           const a = ((e1.id * 17 + e2.id * 31) % 16) * (Math.PI / 8);
           const push = minDist * 0.35;
-          this.trySlideUnit(e1, Math.cos(a) * push, Math.sin(a) * push);
-          this.trySlideUnit(e2, -Math.cos(a) * push, -Math.sin(a) * push);
+          this.trySlideUnit(e1, Math.cos(a) * push, Math.sin(a) * push, buildings);
+          this.trySlideUnit(e2, -Math.cos(a) * push, -Math.sin(a) * push, buildings);
           continue;
         }
         const dist = Math.sqrt(distSq);
         const overlap = minDist - dist;
         const nx = dx / dist;
         const ny = dy / dist;
-        // Moving friendlies yield less — prefer traffic flow over rigid packing.
         const e1Moving = e1.targetX != null || e1.targetEntity != null || e1.followSquadMarch;
         const e2Moving = e2.targetX != null || e2.targetEntity != null || e2.followSquadMarch;
         let w1 = 0.5;
@@ -1416,65 +1433,86 @@ export class Game {
           w1 = e1Moving ? 0.25 : 0.75;
           w2 = 1 - w1;
         }
-        const strength = sameOwner ? 0.55 : 1;
-        this.trySlideUnit(e1, nx * overlap * w1 * strength, ny * overlap * w1 * strength);
-        this.trySlideUnit(e2, -nx * overlap * w2 * strength, -ny * overlap * w2 * strength);
+        const strength = sameSquad ? 0.22 : sameOwner ? 0.55 : 1;
+        this.trySlideUnit(e1, nx * overlap * w1 * strength, ny * overlap * w1 * strength, buildings);
+        this.trySlideUnit(e2, -nx * overlap * w2 * strength, -ny * overlap * w2 * strength, buildings);
       }
 
-      // Buildings are often spawned before units — must check all, not only j > i.
-      for (const e2 of this.entities) {
-        if (!(e2 instanceof Building) || e2.isDead) continue;
+      for (const e2 of buildings) {
         if (e1.buildTarget === e2) continue;
         const dx = e1.x - e2.x;
         const dy = e1.y - e2.y;
         const distSq = dx * dx + dy * dy;
-        const minDist = e1.radius * 0.55 + e2.radius * 0.92;
+        const minDist = e1.radius * 0.65 + e2.radius * 0.92 + 4;
         if (distSq >= minDist * minDist) continue;
         const dist = Math.sqrt(distSq);
         const ang = dist > 0.01 ? Math.atan2(dy, dx) : (e1.id % 16) * 0.4;
-        const target = minDist + 2;
+        const target = minDist + 3;
         let placed = false;
+        // 8 directions only — spiral was a mobile hitch when many units overlapped.
         for (let k = 0; k < 8; k++) {
           const a = ang + (k * Math.PI) / 4;
           const tx = e2.x + Math.cos(a) * target;
           const ty = e2.y + Math.sin(a) * target;
-          if (this.gameMap.isWalkable(tx, ty) && !this.hitsBuildingSolid(e1, tx, ty, e2)) {
+          if (this.gameMap.isWalkable(tx, ty) && !this.hitsBuildingSolid(e1, tx, ty, buildings)) {
             e1.x = tx;
             e1.y = ty;
             placed = true;
             break;
           }
         }
-        if (!placed && dist > 0.01) {
-          e1.x = e2.x + (dx / dist) * target;
-          e1.y = e2.y + (dy / dist) * target;
+        if (!placed && dist > 0.01 && e1.unstickCooldown <= 0) {
+          // One limited ring — cooldown so we don't thrash every frame.
+          for (let k = 0; k < 8; k++) {
+            const a = ang + (k * Math.PI) / 4;
+            const tx = e2.x + Math.cos(a) * (target + 24);
+            const ty = e2.y + Math.sin(a) * (target + 24);
+            if (this.gameMap.isWalkable(tx, ty) && !this.hitsBuildingSolid(e1, tx, ty, buildings)) {
+              e1.x = tx;
+              e1.y = ty;
+              e1.unstickCooldown = 0.4;
+              placed = true;
+              break;
+            }
+          }
         }
       }
     }
   }
 
-  private trySlideUnit(unit: Unit, ox: number, oy: number) {
+  private trySlideUnit(
+    unit: Unit,
+    ox: number,
+    oy: number,
+    buildings: Building[],
+  ) {
     const nx = unit.x + ox;
     const ny = unit.y + oy;
-    if (this.gameMap.isWalkable(nx, ny) && !this.hitsBuildingSolid(unit, nx, ny)) {
+    if (this.gameMap.isWalkable(nx, ny) && !this.hitsBuildingSolid(unit, nx, ny, buildings)) {
       unit.x = nx;
       unit.y = ny;
       return;
     }
-    if (this.gameMap.isWalkable(nx, unit.y) && !this.hitsBuildingSolid(unit, nx, unit.y)) {
+    if (this.gameMap.isWalkable(nx, unit.y) && !this.hitsBuildingSolid(unit, nx, unit.y, buildings)) {
       unit.x = nx;
       return;
     }
-    if (this.gameMap.isWalkable(unit.x, ny) && !this.hitsBuildingSolid(unit, unit.x, ny)) {
+    if (this.gameMap.isWalkable(unit.x, ny) && !this.hitsBuildingSolid(unit, unit.x, ny, buildings)) {
       unit.y = ny;
     }
   }
 
-  private hitsBuildingSolid(unit: Unit, x: number, y: number, ignore?: Building): boolean {
-    for (const e of this.entities) {
-      if (!(e instanceof Building) || e.isDead || e === ignore) continue;
+  private hitsBuildingSolid(
+    unit: Unit,
+    x: number,
+    y: number,
+    buildings: Building[],
+    ignore?: Building,
+  ): boolean {
+    for (const e of buildings) {
+      if (e.isDead || e === ignore) continue;
       if (unit.buildTarget === e) continue;
-      const r = unit.radius * 0.5 + e.radius * 0.85;
+      const r = unit.radius * 0.6 + e.radius * 0.92 + 2;
       if ((x - e.x) * (x - e.x) + (y - e.y) * (y - e.y) < r * r) return true;
     }
     return false;
@@ -1498,7 +1536,7 @@ export class Game {
     for (const entity of this.entities) {
       if (!this.fog.canSeeEntity(entity)) continue;
       drawList.push({
-        depth: isoDepth(entity.x, entity.y),
+        depth: entityIsoSortDepth(entity),
         draw: () => entity.draw(ctx, this.camera, this.gameMap),
       });
     }
