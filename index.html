@@ -2,33 +2,56 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#11170f" />
     <title>Humans vs Orcs RTS</title>
     <link rel="stylesheet" href="/src/style.css">
+    <link rel="stylesheet" href="/src/UI/TouchOverrides.css">
   </head>
   <body>
-    <div id="loading">Loading art kit…</div>
+    <div id="loading">Loading world…</div>
     <div id="lobby" hidden></div>
+
     <canvas id="game-canvas"></canvas>
-    <div id="top-bar">
+
+    <nav id="command-bar" aria-label="Strategic command bar">
+      <div class="command-cluster command-cluster-left">
+        <button class="hud-chip" type="button" data-hud="treasury" aria-label="Treasury"></button>
+        <button class="hud-chip" type="button" data-hud="armies" aria-label="Armies"></button>
+        <button class="hud-chip" type="button" data-hud="cities" aria-label="Cities"></button>
+      </div>
+      <div class="command-cluster command-cluster-right">
+        <button class="hud-chip hud-chip-icon-only" type="button" data-hud="events" aria-label="Events"><span class="hud-chip-icon">◉</span><span class="hud-chip-copy"><strong></strong><small>Events</small></span></button>
+        <button class="hud-chip hud-chip-icon-only" type="button" data-hud="menu" aria-label="Menu"><span class="hud-chip-icon">☰</span><span class="hud-chip-copy"><small>Menu</small></span></button>
+      </div>
+    </nav>
+
+    <section id="empire-sheet" class="hud-sheet" aria-hidden="true" aria-live="polite"></section>
+
+    <div id="dev-menu" class="floating-panel" aria-label="Match menu">
+      <div class="floating-panel-title">Match</div>
       <span id="seed-label">Seed: …</span>
       <span id="pvp-mode-label" hidden></span>
-      <button id="new-map-btn" type="button">New World</button>
-      <button id="territory-btn" type="button" title="Toggle territory overlay (T)">Territory</button>
-      <button id="save-btn" type="button" title="Save game (snapshot + replay log)">Save</button>
+      <button id="territory-btn" type="button" title="Toggle territory overlay (T)">Territory overlay</button>
+      <button id="save-btn" type="button" title="Save game">Save</button>
       <button id="load-btn" type="button" title="Load last save">Load</button>
-      <button id="export-replay-btn" type="button" title="Download seed + command log">Replay</button>
+      <button id="export-replay-btn" type="button" title="Download replay">Export replay</button>
+      <button id="new-map-btn" type="button">New world</button>
       <button id="surrender-btn" type="button" hidden title="Concede the match">Surrender</button>
     </div>
-    <aside id="event-feed" aria-label="World event feed">
-      <div class="event-feed-header">World History</div>
+
+    <aside id="event-feed" class="floating-panel" aria-label="World event feed">
+      <div class="event-feed-header">Chronicle</div>
       <div id="event-feed-list"></div>
     </aside>
-    <div id="cities-overview" aria-label="Cities overview"></div>
-    <div id="ui-container">
+
+    <div id="cities-overview" class="floating-panel" aria-label="Cities overview"></div>
+
+    <section id="ui-container" aria-label="Selection and contextual commands">
       <div id="selection-info"></div>
       <div id="action-buttons"></div>
-    </div>
+    </section>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

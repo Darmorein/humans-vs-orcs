@@ -1,0 +1,22 @@
+/* Interaction overrides that must win over the legacy global stylesheet. */
+html,
+body {
+  touch-action: manipulation;
+}
+
+#game-canvas {
+  touch-action: none;
+}
+
+#lobby {
+  touch-action: pan-y;
+}
+
+/* The base compact-mobile rule hides queues globally; city sheets should retain them. */
+.hud-city-pane .queue-row {
+  display: flex;
+}
+
+.hud-city-pane .queue-hint {
+  display: block;
+}
