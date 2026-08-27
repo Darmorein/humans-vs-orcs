@@ -5,6 +5,12 @@ import { MORALE_DEFAULT } from './Morale';
 export type { SquadFormation } from './FormationDefs';
 export type CombatUnitType = 'Swordsman' | 'Archer' | 'Grunt' | 'SpearOrc';
 
+/**
+ * Explicit squad-level order. Unit AI must not override this hierarchy:
+ * player squad order > squad combat behaviour > individual unit AI.
+ */
+export type SquadOrderMode = 'idle' | 'march' | 'engage' | 'hold' | 'rout';
+
 /** Soft army scaling target mid-match (~8–12). */
 export const SQUAD_MAX_SIZE = 12;
 
@@ -78,6 +84,9 @@ export class Squad {
   public lastTacticalScore = 0;
   public lastTacticalSummary = '';
 
+  /** Explicit order mode — source of truth for Unit discipline. */
+  public orderMode: SquadOrderMode = 'idle';
+
   /** Shared strategic march (one path for the squad anchor). */
   public marchActive = false;
   public orderDestX = 0;
@@ -88,8 +97,19 @@ export class Squad {
   public anchorIndex = 0;
   /** 1 = full formation; lower = temporary column at chokes. */
   public compressMul = 1;
-  /** Member ids temporarily released from slots (anti-stuck). */
-  public releasedSlotIds = new Set<number>();
+  /** Cooldown before another squad-level repath (seconds). */
+  public repathCooldown = 0;
+  /** Accumulated stuck member count this tick (cleared each steer). */
+  public stuckAccum = 0;
+
+  /** Engage: shared primary target entity id. */
+  public primaryTargetId: number | null = null;
+  public engageActive = false;
+  public combatAnchorX = 0;
+  public combatAnchorY = 0;
+  /** Hold: fixed world anchor. */
+  public holdAnchorX = 0;
+  public holdAnchorY = 0;
 
   public readonly maxSize: number;
 

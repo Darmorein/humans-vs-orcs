@@ -420,31 +420,35 @@ export class UIManager {
         this.actionButtonsDiv.appendChild(hint);
       }
 
-      this.renderMilitaryRecruitment();
+      this.renderMilitaryRecruitment(entity);
       this.renderQueueControls(settlement);
     } else if (entity instanceof Building && entity.buildingType === faction.productionBuilding) {
       if (!entity.isConstructed) return;
-      this.renderMilitaryRecruitment();
+      this.renderMilitaryRecruitment(entity);
     }
   }
 
-  /** City / Barracks: recruit complete squads + military queue. */
-  private renderMilitaryRecruitment() {
+  /** City / Barracks: recruit complete squads at the selected building. */
+  private renderMilitaryRecruitment(building: Building) {
     const templates = this.game.listSquadTemplatesForLocal();
     for (const t of templates) {
-      const why = this.game.recruitSquadBlockReason(t.id);
+      const why = this.game.recruitSquadBlockReason(t.id, building.id);
+      const site =
+        building.buildingType === 'Barracks' || building.buildingType === 'OrcBarracks'
+          ? 'Barracks'
+          : 'City';
       const label = why
         ? `Recruit ${t.displayName} — ${why}`
-        : `Recruit ${t.displayName} (${t.treasuryCost}T + ${t.manpowerCost} cit · ${t.trainTime}s)`;
+        : `Recruit ${t.displayName} @ ${site} (${t.treasuryCost}T + ${t.manpowerCost} cit · ${t.trainTime}s)`;
       this.createButton(label, true, () => {
         if (why) {
           this.game.showBuildFeedback(why);
           return;
         }
-        this.game.recruitSquad(t.id);
+        this.game.recruitSquad(t.id, building.id);
       });
     }
-    const queue = this.game.listMilitaryQueue();
+    const queue = this.game.listMilitaryQueue().filter((j) => j.buildingId === building.id);
     if (queue.length > 0) {
       const box = document.createElement('div');
       box.className = 'queue-hint';

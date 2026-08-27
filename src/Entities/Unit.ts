@@ -77,7 +77,21 @@ export class Unit extends Entity {
   /** Squad shared-march: chase live formation slot (no independent strategic A*). */
   public followSquadMarch = false;
   public formationSlotIndex = -1;
-  /** Optional approach point while attacking (ring spread). */
+  /** Consecutive formation stuck recoveries — reset when making progress. */
+  public formationStuckStreak = 0;
+  /** Seconds before another expensive unstick/rescue may run. */
+  public unstickCooldown = 0;
+  /**
+   * Squad order discipline pushed each tick by SquadSystem.
+   * `'none'` = free individual AI (idle / no squad order).
+   */
+  public squadOrderMode: 'none' | 'idle' | 'march' | 'engage' | 'hold' | 'rout' = 'none';
+  /** Shared engage primary target id (squad-level). */
+  public squadPrimaryTargetId: number | null = null;
+  public combatAnchorX = 0;
+  public combatAnchorY = 0;
+  public combatLeash = 92;
+  /** Optional approach point while attacking (legacy ring spread). */
   public approachX: number | null = null;
   public approachY: number | null = null;
   private stuckTimer = 0;
@@ -248,6 +262,8 @@ export class Unit extends Entity {
     this.gatherTarget = null;
     this.buildTarget = null;
     this.followSquadMarch = false;
+    this.squadOrderMode = 'none';
+    this.squadPrimaryTargetId = null;
     this.approachX = null;
     this.approachY = null;
     this.clearStuckProgress();
@@ -266,6 +282,34 @@ export class Unit extends Entity {
     this.approachY = null;
   }
 
+  /** Update live slot destination without cancelling an in-range local fight. */
+  public refreshFormationSeek(x: number, y: number) {
+    this.targetX = x;
+    this.targetY = y;
+    this.approachX = null;
+    this.approachY = null;
+  }
+
+  /**
+   * Local combat focus without abandoning formation seek (Engage / Hold / March fire).
+   * Keeps `targetX`/`targetY` so the unit returns to its slot after the exchange.
+   */
+  public setLocalCombatTarget(entity: Entity | null) {
+    this.targetEntity = entity;
+    this.approachX = null;
+    this.approachY = null;
+  }
+
+  /** True when squad order forbids autonomous long-range pursuit. */
+  public get suppressesAutonomousPursuit(): boolean {
+    return (
+      this.holdGround ||
+      this.squadOrderMode === 'march' ||
+      this.squadOrderMode === 'hold' ||
+      this.squadOrderMode === 'engage'
+    );
+  }
+
   public applySharedPath(path: { x: number; y: number }[]) {
     this.path = path;
     this.pathIndex = 0;
@@ -274,6 +318,7 @@ export class Unit extends Entity {
   public clearStuckProgress() {
     this.stuckTimer = 0;
     this.stuckSignal = false;
+    this.formationStuckStreak = 0;
     this.lastProgressX = this.x;
     this.lastProgressY = this.y;
   }
@@ -304,6 +349,57 @@ export class Unit extends Entity {
     }
   }
 
+  /**
+   * Pop out of building corridors when not under squad recovery.
+   * Deterministic spiral toward open ground — capped for mobile perf.
+   */
+  public unstickFromBuildings(gameMap?: GameMap, entities?: Entity[]) {
+    if (!entities) return;
+    const buildings: Building[] = [];
+    for (const e of entities) {
+      if (e instanceof Building && !e.isDead) buildings.push(e);
+    }
+    const clear = (px: number, py: number) => {
+      if (gameMap && !gameMap.isWalkable(px, py)) return false;
+      const margin = this.radius * 0.65 + 4;
+      for (const e of buildings) {
+        if (this.buildTarget === e) continue;
+        const r = margin + e.radius * 0.95;
+        if ((px - e.x) * (px - e.x) + (py - e.y) * (py - e.y) < r * r) return false;
+      }
+      return true;
+    };
+    if (clear(this.x, this.y)) {
+      let near = 0;
+      for (const e of buildings) {
+        const r = this.radius * 0.7 + e.radius * 1.05 + 10;
+        if ((this.x - e.x) * (this.x - e.x) + (this.y - e.y) * (this.y - e.y) < r * r) near++;
+      }
+      if (near < 2) return;
+    }
+    const step = 14;
+    for (let r = step; r <= 84; r += step) {
+      const samples = 8;
+      for (let i = 0; i < samples; i++) {
+        const a = ((((this.id * 17 + i * 31) % samples) / samples) * Math.PI * 2);
+        const px = this.x + Math.cos(a) * r;
+        const py = this.y + Math.sin(a) * r;
+        if (!clear(px, py)) continue;
+        let near = 0;
+        for (const e of buildings) {
+          const br = this.radius * 0.7 + e.radius * 1.05 + 10;
+          if ((px - e.x) * (px - e.x) + (py - e.y) * (py - e.y) < br * br) near++;
+        }
+        if (near >= 2) continue;
+        this.x = px;
+        this.y = py;
+        this.clearPath();
+        this.clearStuckProgress();
+        return;
+      }
+    }
+  }
+
   public attackCommand(entity: Entity) {
     if (this.isRouting) return;
     this.orderTarget = entity;
@@ -313,6 +409,8 @@ export class Unit extends Entity {
     this.gatherTarget = null;
     this.buildTarget = null;
     this.followSquadMarch = false;
+    this.squadOrderMode = 'none';
+    this.squadPrimaryTargetId = null;
     this.approachX = null;
     this.approachY = null;
     this.clearStuckProgress();
@@ -432,13 +530,25 @@ export class Unit extends Entity {
             this.isAttackingVisual = 0.1;
             this.restartAttackAnimation = true;
             this.chargeStrikeReady = false;
+            // Face the target briefly during the strike, then squad facing resumes.
+            const fdx = this.targetEntity.x - this.x;
+            const fdy = this.targetEntity.y - this.y;
+            const fl = Math.hypot(fdx, fdy);
+            if (fl > 1e-3) {
+              this.facingX = fdx / fl;
+              this.facingY = fdy / fl;
+            }
           }
           this.clearPath();
           this.approachX = null;
           this.approachY = null;
-        } else if (this.holdGround) {
-          // Hold Ground: no pursuit — wait for enemy to enter range
+        } else if (this.suppressesAutonomousPursuit || this.beyondCombatLeash()) {
+          // Discipline: drop chase; resume formation / hold seek if present.
+          this.targetEntity = null;
           this.clearPath();
+          if (this.targetX !== null && this.targetY !== null) {
+            this.chasePoint(this.targetX, this.targetY, dt, gameMap, entities);
+          }
         } else {
           const ax = this.approachX ?? this.targetEntity.x;
           const ay = this.approachY ?? this.targetEntity.y;
@@ -455,6 +565,10 @@ export class Unit extends Entity {
       }
     }
 
+    if (this.unstickCooldown > 0) {
+      this.unstickCooldown = Math.max(0, this.unstickCooldown - dt);
+    }
+
     const moved = Math.hypot(this.x - startX, this.y - startY);
     const tryingToMove =
       !this.isDead &&
@@ -465,18 +579,31 @@ export class Unit extends Entity {
       const progress = Math.hypot(this.x - this.lastProgressX, this.y - this.lastProgressY);
       if (moved < 0.4 && progress < 2.5) {
         this.stuckTimer += dt;
-        if (this.stuckTimer >= 0.7) {
+        const threshold = this.followSquadMarch ? 0.4 : 0.6;
+        if (this.stuckTimer >= threshold) {
           this.stuckSignal = true;
           this.lastProgressX = this.x;
           this.lastProgressY = this.y;
         }
       } else {
         this.stuckTimer = 0;
+        this.formationStuckStreak = 0;
         this.lastProgressX = this.x;
         this.lastProgressY = this.y;
       }
     } else {
       this.stuckTimer = 0;
+    }
+
+    // Cheap overlap eject only — heavy spiral is cooldown-gated.
+    if (entities && !this.isDead && this.unstickCooldown <= 0) {
+      if (!this.canOccupy(this.x, this.y, gameMap, entities)) {
+        this.unstickFromBuildings(gameMap, entities);
+        this.unstickCooldown = 0.75;
+      } else if (!this.followSquadMarch && this.consumeStuckSignal()) {
+        this.unstickFromBuildings(gameMap, entities);
+        this.unstickCooldown = 0.75;
+      }
     }
 
     this.updateVisualAnimation(dt, this.x !== startX || this.y !== startY);
@@ -607,20 +734,43 @@ export class Unit extends Entity {
     ctx.globalAlpha = 1;
   }
 
+  private beyondCombatLeash(): boolean {
+    if (this.squadOrderMode !== 'engage' && this.squadOrderMode !== 'hold') return false;
+    return (
+      Math.hypot(this.x - this.combatAnchorX, this.y - this.combatAnchorY) > this.combatLeash
+    );
+  }
+
   /**
    * While marching to a base/building, switch to nearby enemy units
    * (especially whoever is hitting us), then resume the original order.
+   *
+   * Explicit squad orders (march / engage / hold) suppress autonomous pursuit.
    */
   private retargetThreats(entities?: Entity[]) {
     if (!entities || this.gatherTarget || this.buildTarget) return;
 
     const isWorker = this.unitType === 'Worker' || this.unitType === 'Peon';
-    // Hold Ground: only engage within weapon range (no pursuit aggro)
-    const aggroRange = this.holdGround
-      ? this.attackRange + this.radius + 8
-      : Math.max(this.attackRange * 2.75, isWorker ? 70 : 100);
+    const weaponReachPad = this.attackRange + this.radius + 8;
 
     if (this.orderTarget?.isDead) this.orderTarget = null;
+
+    // --- March: no autonomous pursuit; fire / retaliate only in weapon range ---
+    if (this.squadOrderMode === 'march' && this.followSquadMarch) {
+      this.retargetUnderDiscipline(entities, weaponReachPad, /*keepSeek*/ true);
+      return;
+    }
+
+    // --- Engage / Hold: local targets only near combat anchor / primary ---
+    if (this.squadOrderMode === 'engage' || this.squadOrderMode === 'hold') {
+      this.retargetUnderDiscipline(entities, weaponReachPad, /*keepSeek*/ true);
+      return;
+    }
+
+    // Hold Ground formation without orderMode (legacy path)
+    const aggroRange = this.holdGround
+      ? weaponReachPad
+      : Math.max(this.attackRange * 2.75, isWorker ? 70 : 100);
 
     if (this.targetEntity instanceof Unit && !this.targetEntity.isDead) {
       if (
@@ -636,7 +786,6 @@ export class Unit extends Entity {
           this.clearPath();
         }
       }
-      // Hold Ground: drop chase target that left weapon range
       if (this.holdGround && this.targetEntity) {
         const d = Math.hypot(this.targetEntity.x - this.x, this.targetEntity.y - this.y);
         const reach = this.attackRange + this.targetEntity.radius + this.radius;
@@ -681,7 +830,6 @@ export class Unit extends Entity {
       return;
     }
 
-    // Hold Ground never resumes long-range march on orderTarget by chasing
     if (this.holdGround) return;
 
     if ((!this.targetEntity || this.targetEntity.isDead) && this.orderTarget && !this.orderTarget.isDead) {
@@ -708,6 +856,96 @@ export class Unit extends Entity {
     }
   }
 
+  /**
+   * Weapon-range / leash-bounded retarget that never cancels formation seek (targetX).
+   */
+  private retargetUnderDiscipline(
+    entities: Entity[],
+    weaponReachPad: number,
+    keepSeek: boolean,
+  ) {
+    const dropIfOutOfReach = (e: Entity): boolean => {
+      const d = Math.hypot(e.x - this.x, e.y - this.y);
+      const reach = this.attackRange + e.radius + this.radius;
+      if (d > reach * 1.15) return true;
+      if (this.beyondCombatLeash()) return true;
+      if (
+        this.squadOrderMode === 'engage' &&
+        this.squadPrimaryTargetId != null &&
+        e.id !== this.squadPrimaryTargetId
+      ) {
+        // Local only if near primary or blocking / attacker.
+        const primary = entities.find((x) => x.id === this.squadPrimaryTargetId);
+        if (primary && !primary.isDead) {
+          const nearPrimary =
+            Math.hypot(e.x - primary.x, e.y - primary.y) < 90;
+          const isAttacker = e === this.lastAttacker;
+          if (!nearPrimary && !isAttacker && d > reach) return true;
+        }
+      }
+      return false;
+    };
+
+    if (this.targetEntity && !this.targetEntity.isDead) {
+      if (dropIfOutOfReach(this.targetEntity)) {
+        this.targetEntity = null;
+        this.clearPath();
+      }
+      return;
+    }
+
+    // Prefer primary when already in weapon range (Engage).
+    if (this.squadPrimaryTargetId != null) {
+      const primary = entities.find((e) => e.id === this.squadPrimaryTargetId);
+      if (primary && !primary.isDead && isHostile(this, primary)) {
+        const d = Math.hypot(primary.x - this.x, primary.y - this.y);
+        const reach = this.attackRange + primary.radius + this.radius;
+        if (d <= reach && !this.beyondCombatLeash()) {
+          this.setLocalCombatTarget(primary);
+          return;
+        }
+      }
+    }
+
+    // Retaliation / local contact only within weapon range.
+    let threat: Entity | null = null;
+    let bestDist = weaponReachPad;
+
+    if (
+      this.lastAttacker &&
+      !this.lastAttacker.isDead &&
+      isHostile(this, this.lastAttacker) &&
+      !(this.lastAttacker instanceof ResourceNode)
+    ) {
+      const dist = Math.hypot(this.lastAttacker.x - this.x, this.lastAttacker.y - this.y);
+      if (dist <= weaponReachPad && !this.beyondCombatLeash()) {
+        threat = this.lastAttacker;
+        bestDist = dist;
+      }
+    }
+
+    // Ranged may fire at any hostile already in weapon range without leaving slot.
+    if (this.isRanged || this.squadOrderMode === 'engage' || this.squadOrderMode === 'hold') {
+      for (const e of entities) {
+        if (!(e instanceof Unit) || e.isDead || !isHostile(this, e)) continue;
+        const dist = Math.hypot(e.x - this.x, e.y - this.y);
+        if (dist < bestDist && !this.beyondCombatLeash()) {
+          bestDist = dist;
+          threat = e;
+        }
+      }
+    }
+
+    if (threat) {
+      this.setLocalCombatTarget(threat);
+      if (!keepSeek) {
+        this.targetX = null;
+        this.targetY = null;
+      }
+      this.clearPath();
+    }
+  }
+
   private chasePoint(
     gx: number,
     gy: number,
@@ -716,14 +954,20 @@ export class Unit extends Entity {
     entities?: Entity[],
   ) {
     if (gameMap) {
-      // Near slot / approach: direct seek (avoids N×A* for formation members).
+      // Near slot: direct seek when no recovery path — avoids N×A* for formation members.
+      // If a local path was applied (stuck recovery), follow it instead of ramming solids.
       const near = Math.hypot(gx - this.x, gy - this.y);
-      if (this.followSquadMarch && near < 90) {
+      if (this.followSquadMarch && near < 90 && this.path.length === 0) {
         this.stepToward(gx, gy, dt, gameMap, entities);
         return;
       }
 
       if (this.path.length === 0 || this.pathIndex >= this.path.length) {
+        // During squad march, do not open strategic A* every tick — wait for squad recovery.
+        if (this.followSquadMarch && near < 140) {
+          this.stepToward(gx, gy, dt, gameMap, entities);
+          return;
+        }
         this.path = gameMap.findPath(this.x, this.y, gx, gy, entities, this.buildTarget);
         this.pathIndex = 0;
         if (this.path.length > 0) {
@@ -792,7 +1036,7 @@ export class Unit extends Entity {
     for (const e of entities) {
       if (!(e instanceof Building) || e.isDead) continue;
       if (this.buildTarget === e) continue;
-      const r = this.radius * 0.45 + e.radius * 0.88;
+      const r = this.radius * 0.65 + e.radius * 0.95 + 4;
       if ((x - e.x) * (x - e.x) + (y - e.y) * (y - e.y) < r * r) return false;
     }
     return true;

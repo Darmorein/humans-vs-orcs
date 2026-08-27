@@ -88,6 +88,8 @@ export interface TrainUnitCommand extends CommandBase {
 export interface RecruitSquadCommand extends CommandBase {
   type: 'recruitSquad';
   templateId: string;
+  /** Town Hall / Barracks that trains and spawns the squad. */
+  buildingId: number;
 }
 
 /** Reinforce a depleted squad near a friendly city. */

@@ -745,6 +745,7 @@ export class AISystem {
 
   /**
    * Recruit complete squads from Capital / Barracks (no mandatory Barracks bootstrap).
+   * Spawns at the building that trains them.
    */
   private manageTraining(entities: Entity[]) {
     const faction = this.getFaction();
@@ -768,11 +769,33 @@ export class AISystem {
       : defaultMeleeSquadTemplate(player.factionId);
     if (this.getGold() < template.treasuryCost) return;
 
+    const muster = this.pickMusterBuilding(entities, faction) ?? main;
     this.enqueue({
       type: 'recruitSquad',
       playerId: this.playerId,
       templateId: template.id,
+      buildingId: muster.id,
     });
+  }
+
+  /** Prefer Barracks when present; otherwise Town Hall / Stronghold. */
+  private pickMusterBuilding(
+    entities: Entity[],
+    faction: FactionDefinition,
+  ): Building | null {
+    let barracks: Building | null = null;
+    let hall: Building | null = null;
+    for (const e of entities) {
+      if (!(e instanceof Building) || e.isDead || !e.isConstructed) continue;
+      if (e.ownerPlayerId !== this.playerId) continue;
+      if (e.buildingType === faction.productionBuilding) {
+        if (!barracks || e.id < barracks.id) barracks = e;
+      }
+      if (isMainBuilding(e.buildingType)) {
+        if (!hall || e.id < hall.id) hall = e;
+      }
+    }
+    return barracks ?? hall;
   }
 
   private desiredMilitary(sit: StrategicSituation): number {
