@@ -452,7 +452,7 @@ export class ResponsiveHud {
       const description =
         policy === 'war'
           ? 'Maximum treasury, heavy city pressure'
-          : policy === 'light'
+          : policy === 'low'
             ? 'Lower revenue, healthier growth'
             : 'Balanced city contribution';
       return `<button class="choice-card${active}" type="button" data-tax-policy="${policy}"><strong>${escapeHtml(policyDef.label)}</strong><small>${description}</small></button>`;

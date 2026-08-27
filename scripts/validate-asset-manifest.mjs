@@ -1,4 +1,6 @@
 import { createServer } from 'vite';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 const server = await createServer({
   server: { middlewareMode: true },
@@ -14,6 +16,30 @@ try {
     '/src/Assets/Manifest/Validate.ts',
   );
   const result = validateManifest(ASSET_MANIFEST_V2);
+
+  for (const entry of result.entries) {
+    const publicPath = join(process.cwd(), 'public', entry.src.replace(/^\//, ''));
+    if (!existsSync(publicPath)) {
+      result.errors.push({
+        level: 'error',
+        id: entry.id,
+        message: `Missing public asset file: ${entry.src}`,
+      });
+      result.ok = false;
+    }
+
+    if (entry.teamColorMask) {
+      const maskPath = join(process.cwd(), 'public', entry.teamColorMask.src.replace(/^\//, ''));
+      if (!existsSync(maskPath)) {
+        result.errors.push({
+          level: 'error',
+          id: entry.id,
+          message: `Missing team-color mask file: ${entry.teamColorMask.src}`,
+        });
+        result.ok = false;
+      }
+    }
+  }
 
   for (const warning of result.warnings) {
     console.warn(`[AssetManifest] ${warning.id ?? '?'}: ${warning.message}`);
