@@ -1,5 +1,6 @@
 import type { AssetEntryInput, AssetManifestV2, AssetProductionStandards } from './Types';
 import { ASSET_MANIFEST_VERSION } from './Types';
+import { EXPANSION_ASSET_ENTRIES } from './expansionEntries';
 
 export const ASSET_PRODUCTION_STANDARDS: AssetProductionStandards = {
   space: {
@@ -42,6 +43,8 @@ export const ASSET_MANIFEST_V2: AssetManifestV2 = {
   version: ASSET_MANIFEST_VERSION,
   standards: ASSET_PRODUCTION_STANDARDS,
   assets: [
+    ...EXPANSION_ASSET_ENTRIES,
+
     // —— Humans buildings ——
     a({
       id: 'human/town-hall',
