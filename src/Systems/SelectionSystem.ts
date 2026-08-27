@@ -47,6 +47,13 @@ export class SelectionSystem {
     const localId = MatchState.current?.localPlayerId;
     if (!localId) return;
 
+    // Touch UX: one tap is contextual. Friendly selects, enemy attacks, empty ground moves.
+    // Dragging is consumed by Camera as pan and never reaches this branch.
+    if (input.touchTapPressed) {
+      this.handleTouchTap(input, camera, entities, fog, localId);
+      return;
+    }
+
     if (input.mouseLeftPressed) {
       this.selectionBoxStart = { x: input.mousePos.x, y: input.mousePos.y };
       this.selectionBoxEnd = { x: input.mousePos.x, y: input.mousePos.y };
@@ -146,6 +153,84 @@ export class SelectionSystem {
       }
 
       this.issueOrderCommands(localId, worldPos, clickedEnemy, clickedResource, clickedBuilding);
+    }
+  }
+
+  private handleTouchTap(
+    input: InputManager,
+    camera: Camera,
+    entities: Entity[],
+    fog: FogOfWar,
+    localId: string,
+  ) {
+    const worldPos = camera.screenToWorld(input.mousePos.x, input.mousePos.y);
+    let friendly: Entity | null = null;
+    let resource: ResourceNode | null = null;
+    let enemy: Entity | null = null;
+    let friendlyDist = Number.POSITIVE_INFINITY;
+    let enemyDist = Number.POSITIVE_INFINITY;
+
+    // Touch hit boxes are intentionally forgiving. Prefer owned objects over enemies
+    // when silhouettes overlap so selection remains predictable on a small screen.
+    for (const entity of entities) {
+      if (entity.isDead || !fog.knowsTerrainAt(entity.x, entity.y)) continue;
+      const dx = entity.x - worldPos.x;
+      const dy = entity.y - worldPos.y;
+      const distSq = dx * dx + dy * dy;
+      const touchRadius = Math.max(entity.selectionRadius * 1.7, 22);
+      if (distSq > touchRadius * touchRadius) continue;
+
+      if (entity instanceof ResourceNode) {
+        if (!resource) resource = entity;
+        continue;
+      }
+      if (this.isSelectableUnit(entity, localId)) {
+        if (distSq < friendlyDist) {
+          friendlyDist = distSq;
+          friendly = entity;
+        }
+        continue;
+      }
+      if (
+        entity.ownerPlayerId !== null &&
+        entity.ownerPlayerId !== localId &&
+        fog.canTargetEntity(entity) &&
+        distSq < enemyDist
+      ) {
+        enemyDist = distSq;
+        enemy = entity;
+      }
+    }
+
+    if (friendly) {
+      this.replaceSelection([friendly], entities);
+      return;
+    }
+
+    // With an army selected, battlefield taps are commands rather than deselection.
+    if (this.selectedEntities.length > 0) {
+      this.issueOrderCommands(localId, worldPos, enemy, null, null);
+      return;
+    }
+
+    // Neutral resources remain inspectable when there is no current command context.
+    if (resource) {
+      this.replaceSelection([resource], entities);
+      return;
+    }
+
+    this.replaceSelection([], entities);
+  }
+
+  private replaceSelection(next: Entity[], entities: Entity[]) {
+    for (const entity of this.selectedEntities) entity.selected = false;
+    this.selectedEntities = [];
+    for (const entity of next) {
+      entity.selected = true;
+      this.selectedEntities.push(entity);
+    }
+    if (this.squads && next.some((entity) => entity instanceof Unit)) {
+      this.selectedEntities = this.squads.expandSelectionToSquads(this.selectedEntities, entities);
     }
   }
 
