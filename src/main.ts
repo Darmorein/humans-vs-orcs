@@ -3,6 +3,7 @@ import { assets } from './Assets/Assets';
 import { Game } from './Game';
 import { MapGenerator } from './Map/MapGenerator';
 import { mountLobby, type BootTarget } from './Net';
+import { ResponsiveHud } from './UI/ResponsiveHud';
 import {
   clearPendingLoadSlot,
   peekPendingLoadSlot,
@@ -56,6 +57,7 @@ async function bootGame(target: BootTarget) {
   }
 
   game.start();
+  new ResponsiveHud(game);
 
   if (params.get('debug') === '1' || params.get('detTest') === '1' || params.get('aiDetTest') === '1') {
     (window as unknown as { __game?: Game }).__game = game;
