@@ -25,6 +25,7 @@ export interface AiSoftState {
   actionTimer: number;
   nextActionIn: number;
   expansionCooldown: number;
+  openingCommitted?: boolean;
   guardIds: number[];
   assaultIds: number[];
   harassIds: number[];

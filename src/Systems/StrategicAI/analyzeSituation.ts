@@ -121,7 +121,10 @@ export function analyzeStrategicSituation(ctx: AnalyzeContext): StrategicSituati
         e.buildingType === faction.productionBuilding &&
         !e.isDead &&
         e.ownerPlayerId === ctx.playerId,
-    ) || !!settlement?.queue.hasQueuedOrBuilding(faction.productionBuilding);
+    ) ||
+    !!settlement?.queue.hasQueuedOrBuilding(faction.productionBuilding) ||
+    // Capital grants basic military muster — opening does not wait on Barracks.
+    !!(main && main.isConstructed);
 
   let primaryBridgeContested = false;
   let bridgeFriendlyPresence = 0;

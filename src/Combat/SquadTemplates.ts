@@ -20,11 +20,16 @@ export interface SquadTemplate {
   manpowerCost: number;
   /** Seconds of sim time to train a full squad. */
   trainTime: number;
-  requiredCapability: 'barracks';
+  /**
+   * `basic` — Capital Town Center can muster (no Barracks bootstrap).
+   * `advanced` — requires a Barracks (reserved for future templates).
+   */
+  requiredCapability: 'basic' | 'advanced';
 }
 
 const BULK_DISCOUNT = 0.9;
-const TRAIN_TIME_SEC = 12;
+/** Basic squad train time — opening target ~8–15s. */
+const TRAIN_TIME_SEC = 10;
 const TARGET_SIZE = 4;
 
 function memberTreasury(unitType: CombatUnitType, factionId: FactionId): number {
@@ -51,7 +56,7 @@ function buildTemplate(
     treasuryCost: Math.floor(per * TARGET_SIZE * BULK_DISCOUNT),
     manpowerCost: TARGET_SIZE,
     trainTime: TRAIN_TIME_SEC,
-    requiredCapability: 'barracks',
+    requiredCapability: 'basic',
   };
 }
 

@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node --test tests/animation.test.ts tests/movement.test.ts tests/squad-recruitment.test.ts",
+    "test": "node --test tests/animation.test.ts tests/movement.test.ts tests/squad-recruitment.test.ts tests/opening-pressure.test.ts",
+    "test:mapgen": "npx --yes tsx --test tests/map-gen-benchmark.test.ts",
     "validate:assets": "node scripts/validate-asset-manifest.mjs",
     "build": "npm run validate:assets && tsc && vite build",
     "preview": "vite preview",

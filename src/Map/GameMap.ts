@@ -13,7 +13,19 @@ export type MapDecoration = {
   x: number;
   y: number;
   radius: number;
-  kind: 'tree' | 'pine' | 'rock' | 'bush' | 'stump' | 'skull';
+  kind:
+    | 'tree'
+    | 'pine'
+    | 'rock'
+    | 'bush'
+    | 'stump'
+    | 'skull'
+    | 'flowers'
+    | 'blueFlowers'
+    | 'pebbles'
+    | 'cart'
+    | 'fence'
+    | 'marketStall';
 };
 
 export class GameMap {
@@ -25,12 +37,16 @@ export class GameMap {
   public tiles: TerrainTile[];
   public decorations: MapDecoration[] = [];
   public seed: number;
-  /** Seat start slot A (SW-ish) — not faction. */
+  /** Seat start slot A — not faction. */
   public startA: { x: number; y: number };
-  /** Seat start slot B (NE-ish) — not faction. */
+  /** Seat start slot B — not faction. */
   public startB: { x: number; y: number };
   public goldDeposits: { x: number; y: number }[];
   public validation: GeneratedMap['validation'];
+  public mapGeneratorVersion: number;
+  public layout: string;
+  public expansionSites: GeneratedMap['expansionSites'];
+  public regions: GeneratedMap['regions'];
   /** Scratch buffer for building footprints in pathfinding. */
   private pathBlockedScratch: Uint8Array | null = null;
 
@@ -46,6 +62,10 @@ export class GameMap {
     this.startB = generated.startB;
     this.goldDeposits = generated.goldDeposits;
     this.validation = generated.validation;
+    this.mapGeneratorVersion = generated.mapGeneratorVersion ?? 1;
+    this.layout = generated.layout ?? 'LEGACY';
+    this.expansionSites = generated.expansionSites ?? [];
+    this.regions = generated.regions ?? [];
     this.buildDecorations();
     assertTerrainDefinitionsComplete();
   }
@@ -246,7 +266,14 @@ export class GameMap {
         const cx = (tx + 0.5) * this.tileSize;
         const cy = (ty + 0.5) * this.tileSize;
         const screen = camera.worldToScreen(cx, cy);
-        const spriteKey = terrainSpriteKey(tile.type);
+        const spriteKey = terrainSpriteKey(
+          tile.type,
+          this.tiles,
+          this.tileWidth,
+          this.tileHeight,
+          tx,
+          ty,
+        );
         const sprite = spriteKey ? assets.get(spriteKey) : null;
 
         if (sprite && spriteKey) {
@@ -291,14 +318,21 @@ export class GameMap {
           ? 0.28 + deco.radius * 0.004
           : deco.kind === 'rock'
             ? 0.26
-            : 0.22;
+            : deco.kind === 'cart' || deco.kind === 'marketStall'
+              ? 0.24
+              : 0.22;
       drawSprite(ctx, sprite, screenPos.x, screenPos.y, scale, { pivotY: 0.9 });
       return;
     }
 
     if (deco.kind === 'tree' || deco.kind === 'pine') {
       drawIsoTree(ctx, screenPos.x, screenPos.y, deco.radius);
-    } else {
+    } else if (
+      deco.kind === 'rock' ||
+      deco.kind === 'bush' ||
+      deco.kind === 'stump' ||
+      deco.kind === 'skull'
+    ) {
       drawIsoRock(ctx, screenPos.x, screenPos.y, deco.radius);
     }
   }
@@ -332,32 +366,44 @@ export class GameMap {
       return x - Math.floor(x);
     };
 
+    /** Cap props so 160×160 does not explode draw cost. */
+    const maxDeco = Math.min(2800, Math.floor(this.tileWidth * this.tileHeight * 0.045));
     let n = this.seed;
+    const nearStart = (wx: number, wy: number) => {
+      const da = Math.hypot(wx - this.startA.x, wy - this.startA.y);
+      const db = Math.hypot(wx - this.startB.x, wy - this.startB.y);
+      return Math.min(da, db) < this.tileSize * 14;
+    };
+    const nearGold = (wx: number, wy: number) =>
+      this.goldDeposits.some((g) => Math.hypot(wx - g.x, wy - g.y) < this.tileSize * 4);
+
     for (let ty = 0; ty < this.tileHeight; ty++) {
       for (let tx = 0; tx < this.tileWidth; tx++) {
+        if (this.decorations.length >= maxDeco) break;
         const tile = this.tiles[ty * this.tileWidth + tx]!;
         const cx = (tx + 0.5) * this.tileSize;
         const cy = (ty + 0.5) * this.tileSize;
+        const urban = nearStart(cx, cy);
 
         if (tile.type === 'forest' || tile.type === 'denseForest') {
-          if (rng(n++) < 0.4) continue;
-          const pine = rng(n++) > 0.55;
+          if (rng(n++) < 0.48) continue;
+          const pine = rng(n++) > 0.5 || tile.type === 'denseForest';
           this.decorations.push({
             x: cx + (rng(n++) - 0.5) * this.tileSize * 0.5,
             y: cy + (rng(n++) - 0.5) * this.tileSize * 0.5,
             radius: 8 + rng(n++) * 8,
             kind: pine ? 'pine' : 'tree',
           });
-          if (rng(n++) > 0.85) {
+          if (rng(n++) > 0.88) {
             this.decorations.push({
               x: cx + (rng(n++) - 0.5) * 10,
               y: cy + (rng(n++) - 0.5) * 10,
               radius: 6,
-              kind: 'bush',
+              kind: rng(n++) > 0.55 ? 'bush' : 'stump',
             });
           }
         } else if (tile.type === 'mountain') {
-          if (rng(n++) > 0.65) {
+          if (rng(n++) > 0.68) {
             this.decorations.push({
               x: cx + (rng(n++) - 0.5) * 8,
               y: cy + (rng(n++) - 0.5) * 8,
@@ -365,36 +411,70 @@ export class GameMap {
               kind: 'rock',
             });
           }
-        } else if (tile.type === 'hill' && rng(n++) > 0.8) {
+        } else if (tile.type === 'hill' && rng(n++) > 0.82) {
           this.decorations.push({
             x: cx,
             y: cy,
             radius: 8 + rng(n++) * 6,
             kind: 'rock',
           });
-        } else if (tile.type === 'grass' && rng(n++) > 0.97) {
-          this.decorations.push({
-            x: cx,
-            y: cy,
-            radius: 5,
-            kind: rng(n++) > 0.5 ? 'bush' : 'stump',
-          });
-        } else if (tile.type === 'road' && rng(n++) > 0.992) {
-          this.decorations.push({
-            x: cx,
-            y: cy,
-            radius: 5,
-            kind: 'skull',
-          });
+        } else if (tile.type === 'grass') {
+          if (urban && rng(n++) > 0.965) {
+            const roll = rng(n++);
+            this.decorations.push({
+              x: cx + (rng(n++) - 0.5) * 6,
+              y: cy + (rng(n++) - 0.5) * 6,
+              radius: 5,
+              kind: roll > 0.66 ? 'cart' : roll > 0.33 ? 'fence' : 'marketStall',
+            });
+          } else if (rng(n++) > 0.978) {
+            this.decorations.push({
+              x: cx,
+              y: cy,
+              radius: 4,
+              kind: rng(n++) > 0.5 ? 'flowers' : 'blueFlowers',
+            });
+          } else if (rng(n++) > 0.985) {
+            this.decorations.push({
+              x: cx,
+              y: cy,
+              radius: 4,
+              kind: 'pebbles',
+            });
+          } else if (rng(n++) > 0.972) {
+            this.decorations.push({
+              x: cx,
+              y: cy,
+              radius: 5,
+              kind: rng(n++) > 0.5 ? 'bush' : 'stump',
+            });
+          }
+        } else if (tile.type === 'road') {
+          if (rng(n++) > 0.991) {
+            this.decorations.push({
+              x: cx,
+              y: cy,
+              radius: 5,
+              kind: nearGold(cx, cy) || rng(n++) > 0.4 ? 'skull' : 'pebbles',
+            });
+          }
         }
       }
+      if (this.decorations.length >= maxDeco) break;
     }
 
     this.decorations.sort((a, b) => a.x + a.y - (b.x + b.y));
   }
 }
 
-function terrainSpriteKey(type: TerrainType): AssetKey | null {
+function terrainSpriteKey(
+  type: TerrainType,
+  tiles?: TerrainTile[],
+  width?: number,
+  height?: number,
+  tx?: number,
+  ty?: number,
+): AssetKey | null {
   switch (type) {
     case 'grass':
     case 'forest':
@@ -404,6 +484,7 @@ function terrainSpriteKey(type: TerrainType): AssetKey | null {
       return 'world/hill';
     case 'stone':
     case 'iron':
+      // RESOURCE_ART_MISSING: no dedicated stone/iron sprites in Manifest v2.
       return 'terrain/dirt';
     case 'mountain':
       return 'terrain/rocks';
@@ -413,10 +494,48 @@ function terrainSpriteKey(type: TerrainType): AssetKey | null {
     case 'bridge':
       return 'world/bridge';
     case 'road':
-      return 'terrain/path-straight';
+      return roadSpriteKey(tiles, width, height, tx, ty);
     case 'gold':
       return 'terrain/dirt';
   }
+}
+
+function roadSpriteKey(
+  tiles?: TerrainTile[],
+  width?: number,
+  height?: number,
+  tx?: number,
+  ty?: number,
+): AssetKey {
+  if (!tiles || width == null || height == null || tx == null || ty == null) {
+    return 'terrain/path-straight';
+  }
+  const isRoad = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return false;
+    const t = tiles[y * width + x]?.type;
+    return t === 'road' || t === 'bridge';
+  };
+  const n = isRoad(tx, ty - 1) ? 1 : 0;
+  const e = isRoad(tx + 1, ty) ? 1 : 0;
+  const s = isRoad(tx, ty + 1) ? 1 : 0;
+  const w = isRoad(tx - 1, ty) ? 1 : 0;
+  const mask = (n << 3) | (e << 2) | (s << 1) | w;
+  // 4-way
+  if (mask === 0b1111) return 'terrain/path-cross';
+  // T-junctions
+  if (mask === 0b0111 || mask === 0b1011 || mask === 0b1101 || mask === 0b1110) {
+    return 'terrain/path-t-junction';
+  }
+  // Corners (two adjacent)
+  if (
+    mask === 0b1100 ||
+    mask === 0b0110 ||
+    mask === 0b0011 ||
+    mask === 0b1001
+  ) {
+    return 'terrain/path-corner';
+  }
+  return 'terrain/path-straight';
 }
 
 function decorationSpriteKey(kind: MapDecoration['kind']): AssetKey | null {
@@ -433,6 +552,18 @@ function decorationSpriteKey(kind: MapDecoration['kind']): AssetKey | null {
       return 'terrain/stump';
     case 'skull':
       return 'terrain/battlefield-skull';
+    case 'flowers':
+      return 'terrain/flowers';
+    case 'blueFlowers':
+      return 'terrain/blue-flowers';
+    case 'pebbles':
+      return 'terrain/pebbles';
+    case 'cart':
+      return 'terrain/cart';
+    case 'fence':
+      return 'terrain/fence';
+    case 'marketStall':
+      return 'terrain/market-stall';
   }
 }
 
