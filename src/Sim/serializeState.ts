@@ -48,6 +48,8 @@ export interface SquadSnapshot {
 export interface GameStateSnapshot {
   version: typeof GAME_STATE_VERSION;
   seed: number;
+  /** Map gen algorithm version (optional — older saves omit → treat as v1). */
+  mapGeneratorVersion?: number;
   simTick: number;
   rngState: number;
   idAllocators: IdAllocatorState;
@@ -174,6 +176,7 @@ export interface GameStateSnapshot {
 
 export function serializeGameState(args: {
   seed: number;
+  mapGeneratorVersion?: number;
   simTick: number;
   rng: GameRng;
   match: MatchState;
@@ -191,6 +194,7 @@ export function serializeGameState(args: {
   return {
     version: GAME_STATE_VERSION,
     seed: args.seed,
+    mapGeneratorVersion: args.mapGeneratorVersion,
     simTick: args.simTick,
     rngState: args.rng.getState(),
     idAllocators: captureIdAllocators(),

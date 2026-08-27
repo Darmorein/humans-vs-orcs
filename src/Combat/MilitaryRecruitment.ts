@@ -62,7 +62,7 @@ export interface MilitaryJobSnapshot {
 
 /**
  * Squad-centric military production.
- * Barracks / city enqueue jobs; members spawn as a coherent pre-registered group.
+ * Capital TC musters basic squads; Barracks add queue slots + faster train.
  */
 export class MilitaryRecruitmentSystem {
   private jobs: MilitaryJob[] = [];
@@ -119,22 +119,24 @@ export class MilitaryRecruitmentSystem {
     if (player.pop + template.manpowerCost > player.maxPop) {
       return `Need ${player.pop + template.manpowerCost - player.maxPop} more housing`;
     }
-    const barracks = this.findBarracks(playerId, entities);
-    if (!barracks) return 'Requires Barracks';
+    const muster = this.findMusterBuilding(playerId, entities, template);
+    if (!muster) {
+      return template.requiredCapability === 'advanced'
+        ? 'Requires Barracks'
+        : 'No capital muster site';
+    }
     if (player.gold < template.treasuryCost) {
       return `Need ${template.treasuryCost - Math.floor(player.gold)} more Treasury`;
     }
     const draftWhy = settlements.draftBlockReason(
       playerId,
-      barracks.x,
-      barracks.y,
+      muster.x,
+      muster.y,
       template.manpowerCost,
     );
     if (draftWhy) return draftWhy;
-    // Cap concurrent jobs — one Barracks ≈ one active slot early/mid.
     const active = this.jobs.filter((j) => j.playerId === playerId).length;
-    const barracksCount = this.countBarracks(playerId, entities);
-    if (active >= Math.max(1, barracksCount)) {
+    if (active >= this.queueCapacity(playerId, entities)) {
       return 'Recruitment queue full';
     }
     return null;
@@ -157,11 +159,11 @@ export class MilitaryRecruitmentSystem {
     if (why) return null;
     const player = args.match.getPlayer(args.playerId)!;
     const template = getSquadTemplate(args.templateId)!;
-    const barracks = this.findBarracks(args.playerId, args.entities)!;
+    const muster = this.findMusterBuilding(args.playerId, args.entities, template)!;
     const settlementId = args.settlements.draftForRecruitment(
       args.playerId,
-      barracks.x,
-      barracks.y,
+      muster.x,
+      muster.y,
       template.manpowerCost,
     );
     if (!settlementId) return null;
@@ -174,12 +176,12 @@ export class MilitaryRecruitmentSystem {
       kind: 'recruit',
       playerId: args.playerId,
       templateId: template.id,
-      buildingId: barracks.id,
+      buildingId: muster.id,
       settlementId,
       squadId: null,
       membersNeeded: template.targetSize,
       progress: 0,
-      trainTime: template.trainTime,
+      trainTime: this.effectiveTrainTime(template, args.playerId, args.entities),
       displayName,
     });
     void player;
@@ -205,10 +207,14 @@ export class MilitaryRecruitmentSystem {
     if (!this.squadNearFriendlyCity(squad, entities, settlements, playerId)) {
       return 'Must be near friendly city';
     }
-    const barracks = this.findBarracks(playerId, entities);
-    if (!barracks) return 'Requires Barracks';
     const template = this.templateForSquad(squad);
     if (!template) return 'Unknown squad type';
+    const muster = this.findMusterBuilding(playerId, entities, template);
+    if (!muster) {
+      return template.requiredCapability === 'advanced'
+        ? 'Requires Barracks'
+        : 'No capital muster site';
+    }
     const cost = reinforceMemberTreasuryCost(template, player.factionId) * missing;
     if (player.gold < cost) {
       return `Need ${cost - Math.floor(player.gold)} more Treasury`;
@@ -216,14 +222,13 @@ export class MilitaryRecruitmentSystem {
     if (player.pop + missing > player.maxPop) {
       return `Need ${player.pop + missing - player.maxPop} more housing`;
     }
-    const draftWhy = settlements.draftBlockReason(playerId, barracks.x, barracks.y, missing);
+    const draftWhy = settlements.draftBlockReason(playerId, muster.x, muster.y, missing);
     if (draftWhy) return draftWhy;
     if (this.jobs.some((j) => j.squadId === squadId && j.kind === 'reinforce')) {
       return 'Already reinforcing';
     }
     const active = this.jobs.filter((j) => j.playerId === playerId).length;
-    const barracksCount = this.countBarracks(playerId, entities);
-    if (active >= Math.max(1, barracksCount)) {
+    if (active >= this.queueCapacity(playerId, entities)) {
       return 'Recruitment queue full';
     }
     return null;
@@ -250,12 +255,12 @@ export class MilitaryRecruitmentSystem {
     const squad = args.squads.get(args.squadId)!;
     const template = this.templateForSquad(squad)!;
     const missing = Math.max(0, (squad.targetSize || squad.maxSize) - squad.memberIds.length);
-    const barracks = this.findBarracks(args.playerId, args.entities)!;
+    const muster = this.findMusterBuilding(args.playerId, args.entities, template)!;
     const cost = reinforceMemberTreasuryCost(template, player.factionId) * missing;
     const settlementId = args.settlements.draftForRecruitment(
       args.playerId,
-      barracks.x,
-      barracks.y,
+      muster.x,
+      muster.y,
       missing,
     );
     if (!settlementId) return null;
@@ -267,7 +272,7 @@ export class MilitaryRecruitmentSystem {
       kind: 'reinforce',
       playerId: args.playerId,
       templateId: template.id,
-      buildingId: barracks.id,
+      buildingId: muster.id,
       settlementId,
       squadId: squad.id,
       membersNeeded: missing,
@@ -442,14 +447,37 @@ export class MilitaryRecruitmentSystem {
     return { x: 0, y: 0 };
   }
 
+  /**
+   * Prefer Barracks when present; otherwise Capital TC for basic templates.
+   */
+  private findMusterBuilding(
+    playerId: string,
+    entities: Entity[],
+    template: SquadTemplate,
+  ): Building | null {
+    const barracks = this.findBarracks(playerId, entities);
+    if (barracks) return barracks;
+    if (template.requiredCapability === 'advanced') return null;
+    return this.findCapital(playerId, entities);
+  }
+
+  private findCapital(playerId: string, entities: Entity[]): Building | null {
+    const player = FACTIONS;
+    for (const e of entities) {
+      if (!(e instanceof Building) || e.isDead || !e.isConstructed) continue;
+      if (e.ownerPlayerId !== playerId) continue;
+      if (isMainBuilding(e.buildingType)) return e;
+    }
+    void player;
+    return null;
+  }
+
   private findBarracks(playerId: string, entities: Entity[]): Building | null {
-    const playerFaction = FACTIONS;
     for (const e of entities) {
       if (!(e instanceof Building) || e.isDead || !e.isConstructed) continue;
       if (e.ownerPlayerId !== playerId) continue;
       if (e.buildingType === 'Barracks' || e.buildingType === 'OrcBarracks') return e;
     }
-    void playerFaction;
     return null;
   }
 
@@ -461,6 +489,24 @@ export class MilitaryRecruitmentSystem {
       if (e.buildingType === 'Barracks' || e.buildingType === 'OrcBarracks') n++;
     }
     return n;
+  }
+
+  /** Capital grants 1 basic slot; each Barracks grants +1. */
+  private queueCapacity(playerId: string, entities: Entity[]): number {
+    const capital = this.findCapital(playerId, entities);
+    const barracks = this.countBarracks(playerId, entities);
+    return (capital ? 1 : 0) + barracks;
+  }
+
+  /** Barracks accelerate basic production (~28% faster). */
+  private effectiveTrainTime(
+    template: SquadTemplate,
+    playerId: string,
+    entities: Entity[],
+  ): number {
+    const hasBarracks = this.countBarracks(playerId, entities) > 0;
+    if (hasBarracks) return Math.max(6, template.trainTime * 0.72);
+    return template.trainTime;
   }
 
   private squadNearFriendlyCity(

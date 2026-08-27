@@ -79,8 +79,10 @@ import { isCombatUnitType } from './Combat/Squad';
 import { MilitaryRecruitmentSystem } from './Combat/MilitaryRecruitment';
 import {
   defaultMeleeSquadTemplate,
+  defaultRangedSquadTemplate,
   squadTemplatesForFaction,
 } from './Combat/SquadTemplates';
+import type { SquadTemplate } from './Combat/SquadTemplates';
 import { formationOffsets, orientOffsets } from './Combat/Formations';
 import { doctrineOf } from './Players/FactionDoctrine';
 
@@ -428,6 +430,7 @@ export class Game {
   public exportStateSnapshot(): GameStateSnapshot {
     return serializeGameState({
       seed: this.seed,
+      mapGeneratorVersion: this.gameMap.mapGeneratorVersion,
       simTick: this.simTick,
       rng: this.simRng,
       match: this.match,
@@ -785,15 +788,23 @@ export class Game {
     return player.id === 'player-1' ? this.gameMap.startA : this.gameMap.startB;
   }
 
-  /** Spawn a complete closed starter infantry squad at the capital. */
-  private spawnStarterSquad(player: PlayerState, x: number, y: number) {
-    const template = defaultMeleeSquadTemplate(player.factionId);
+  /**
+   * Spawn one closed starter squad (melee or ranged) offset from the capital.
+   */
+  private spawnStarterSquad(
+    player: PlayerState,
+    x: number,
+    y: number,
+    template: SquadTemplate,
+    ordinalLabel: string,
+    offset: { x: number; y: number },
+  ) {
     const squad = this.squadSystem.createClosedSquad({
       ownerPlayerId: player.id,
       unitType: template.memberUnitType,
       maxSize: template.targetSize,
       targetSize: template.targetSize,
-      displayName: `1st ${template.displayName.replace(/ Squad$/i, '')}`,
+      displayName: `${ordinalLabel} ${template.displayName.replace(/ Squad$/i, '')}`,
       templateId: template.id,
     });
     squad.formation = doctrineOf(player.factionId).defaultFormation;
@@ -802,8 +813,8 @@ export class Game {
       0,
       1,
     );
-    const musterX = x + 45;
-    const musterY = y + 55;
+    const musterX = x + offset.x;
+    const musterY = y + offset.y;
     for (let i = 0; i < template.targetSize; i++) {
       const o = offsets[i] ?? { x: (i - 1.5) * 22, y: 0 };
       const unit = spawnUnitRegistered({
@@ -821,6 +832,14 @@ export class Game {
     }
   }
 
+  /** Two coherent starter tools: melee screen + ranged / support. */
+  private spawnStarterArmy(player: PlayerState, base: { x: number; y: number }) {
+    const melee = defaultMeleeSquadTemplate(player.factionId);
+    const ranged = defaultRangedSquadTemplate(player.factionId);
+    this.spawnStarterSquad(player, base.x, base.y, melee, '1st', { x: 50, y: 40 });
+    this.spawnStarterSquad(player, base.x, base.y, ranged, '1st', { x: 28, y: 78 });
+  }
+
   private spawnPlayers() {
     for (const player of this.match.allPlayers()) {
       const base = this.baseForPlayer(player);
@@ -828,8 +847,8 @@ export class Game {
 
       this.entities.push(new Building(base.x, base.y, faction.mainBuilding, player));
 
-      // Living start: one coherent starter infantry squad (teaches squad model).
-      this.spawnStarterSquad(player, base.x, base.y);
+      // Immediate pressure opening: two coherent starter squads (no Barracks wait).
+      this.spawnStarterArmy(player, base);
     }
 
     for (const gold of this.gameMap.goldDeposits) {
@@ -875,8 +894,8 @@ export class Game {
       s.food = Math.max(s.food, CITY_PACING.startFood);
       s.wood = Math.max(s.wood, 140);
       s.stone = Math.max(s.stone, 85);
-      // Faction Treasury stays on player.gold (200–350 from match setup).
-      player.gold = Math.max(player.gold, 400);
+      // Faction Treasury — enough for early reinforcement, not spam.
+      player.gold = Math.max(player.gold, 560);
       // Local settlement gold is independent — seed ~100, do not mirror treasury.
       s.gold = CITY_PACING.startLocalGold + Math.floor(this.simRng.range(0, 21));
 
@@ -898,13 +917,14 @@ export class Game {
     );
   }
 
-  /** Seed 2 Houses + 1 Farm (constructed) near the capital TC. */
+  /** Seed 3 Houses + 1 Farm (constructed) near the capital TC — housing for 2 starters + 1 recruit. */
   private seedStartingStructures(player: PlayerState, settlementId: string) {
     const base = this.baseForPlayer(player);
     const farmType = player.factionId === 'orcs' ? 'PigFarm' : 'Farm';
     const offsets: Array<{ x: number; y: number; type: BuildingType }> = [
       { x: 72, y: 28, type: 'House' },
       { x: -68, y: 36, type: 'House' },
+      { x: -40, y: -70, type: 'House' },
       { x: 24, y: 78, type: farmType },
     ];
     for (const o of offsets) {

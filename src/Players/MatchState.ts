@@ -129,7 +129,7 @@ export function createDefaultMatch(options?: {
     controllerType: options?.localController ?? 'LOCAL',
     playerColor: PLAYER_COLORS[0],
     displayName: options?.localDisplayName ?? 'Player 1',
-    gold: 480,
+    gold: 560,
   });
 
   const p2 = new PlayerState({
@@ -140,7 +140,7 @@ export function createDefaultMatch(options?: {
     displayName:
       options?.opponentDisplayName ??
       (opponentFaction === 'orcs' ? 'Orc Warlord' : 'Human Commander'),
-    gold: 520,
+    gold: 600,
   });
 
   return new MatchState([p1, p2], p1.id);
@@ -164,7 +164,7 @@ export function createPvpMatch(options: {
     controllerType: options.localSeat === 0 ? 'LOCAL' : 'REMOTE',
     playerColor: PLAYER_COLORS[0],
     displayName: names[0],
-    gold: 480,
+    gold: 560,
   });
 
   const p2 = new PlayerState({
@@ -173,7 +173,7 @@ export function createPvpMatch(options: {
     controllerType: options.localSeat === 1 ? 'LOCAL' : 'REMOTE',
     playerColor: PLAYER_COLORS[1],
     displayName: names[1],
-    gold: 480,
+    gold: 560,
   });
 
   const localId = options.localSeat === 0 ? p1.id : p2.id;

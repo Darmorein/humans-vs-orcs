@@ -22,7 +22,7 @@ const FOOD_PER_CITIZEN = 0.45;
 /**
  * Keep a living city after drafts. Start pop ~42 → allows ~16 drafts (8–12 fighters + buffer).
  */
-export const MIN_CIVILIAN_RESERVE = 26;
+export const MIN_CIVILIAN_RESERVE = 24;
 const MAX_AGE = 70;
 const TICK = 1.0; // accumulate to ~1s steps for light sim
 

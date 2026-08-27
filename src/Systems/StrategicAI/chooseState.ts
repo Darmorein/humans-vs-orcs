@@ -119,15 +119,16 @@ function scoreExpand(sit: StrategicSituation): ScoredState {
 
 function scoreAttack(sit: StrategicSituation): ScoredState {
   let score = 0;
-  if (!sit.hasProduction) return { state: 'attack', score: 0, reason: 'no barracks' };
-  if (sit.armyCount >= 3 && sit.armyRatio >= 0.85) score += 28;
-  if (sit.armyCount >= 5 && sit.armyRatio >= 1.0) score += 22;
-  if (sit.armyCount >= 7 && sit.armyRatio >= 0.95) score += 16;
+  if (!sit.hasProduction) return { state: 'attack', score: 0, reason: 'no muster' };
+  // Accept near-parity fights early (4v4 / 6v5), not only crushing superiority.
+  if (sit.armyCount >= 4 && sit.armyRatio >= 0.75) score += 26;
+  if (sit.armyCount >= 6 && sit.armyRatio >= 0.9) score += 20;
+  if (sit.armyCount >= 8 && sit.armyRatio >= 0.95) score += 14;
   if (sit.gold >= 60 && sit.prosperity > 0.3) score += 10;
   if (sit.territoryOwnShare > 0.45) score += 8;
-  if (sit.doctrineHarass > 0.6 && sit.armyRatio >= 0.9) score += 8;
+  if (sit.doctrineHarass > 0.6 && sit.armyRatio >= 0.85) score += 8;
   if (sit.threatNearBase > 0) score *= 0.15;
-  if (sit.armyRatio < 0.7) score *= 0.45;
+  if (sit.armyRatio < 0.55) score *= 0.4;
   if (sit.workerCount < 4) score *= 0.85;
   return {
     state: 'attack',
@@ -138,26 +139,26 @@ function scoreAttack(sit: StrategicSituation): ScoredState {
 
 function scoreRaid(sit: StrategicSituation): ScoredState {
   let score = 0;
-  if (!sit.hasProduction) return { state: 'raid', score: 0, reason: 'no barracks' };
-  if (sit.armyCount >= 2 && sit.armyRatio >= 0.6) {
-    score += 24 + sit.doctrineHarass * 28;
+  if (!sit.hasProduction) return { state: 'raid', score: 0, reason: 'no muster' };
+  if (sit.armyCount >= 4 && sit.armyRatio >= 0.55) {
+    score += 28 + sit.doctrineHarass * 28;
   }
-  if (sit.nearbyMineCount >= 1 && sit.enemyArmyCount >= 2) score += 8;
-  if (sit.primaryBridgeContested === false && sit.armyCount >= 3) score += 10;
+  if (sit.nearbyMineCount >= 1 && sit.enemyArmyCount >= 2) score += 10;
+  if (sit.primaryBridgeContested === false && sit.armyCount >= 4) score += 14;
   if (sit.armyRatio >= 1.4) score *= 0.55; // prefer Attack when crushing
   if (sit.threatNearBase > 0) score *= 0.2;
-  if (sit.armyCount < 2) score *= 0.3;
+  if (sit.armyCount < 4) score *= 0.35;
   return {
     state: 'raid',
     score,
-    reason: 'harass economy',
+    reason: 'contest frontier',
   };
 }
 
 function scoreDevelop(sit: StrategicSituation): ScoredState {
-  let score = 18; // default posture
+  let score = 14; // lower default so raid/attack can win with starter armies
   if (sit.topNeed) score += 16;
-  if (sit.workerCount < 5) score += 20;
+  if (sit.workerCount < 5) score += 18;
   if (!sit.hasProduction && sit.workerCount >= 3) score += 14;
   if (sit.housingPressure > 0.3) score += 12;
   if (sit.food < 25) score += 14;
@@ -165,8 +166,8 @@ function scoreDevelop(sit: StrategicSituation): ScoredState {
   if (sit.doctrineCraft >= 1.2 && sit.craftsmanship < 0.45) score += 12;
   if (sit.prosperity < 0.4) score += 10;
   if (sit.resourcePressure > 0.8) score += 8;
-  // Soft preference early / when army is thin
-  if (sit.armyCount < 3) score += 8;
+  // Soft preference only when army is thin
+  if (sit.armyCount < 4) score += 8;
   return {
     state: 'develop',
     score,

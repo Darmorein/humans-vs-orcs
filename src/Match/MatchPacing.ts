@@ -1,9 +1,9 @@
 /**
  * City-centric match pacing knobs and documented timeline targets.
  *
- * Design intent (mobile skirmish ~12–18 min):
- * - Living start → Outpost mid-game → Second city later (~5–7 min), not immediately.
- * - Second city is intentionally gated (higher settler pop / Town tier / treasury).
+ * Design intent (mobile skirmish ~10–15 min, pressure-first opening):
+ * - Two starter squads → immediate map choice → first contact <90s.
+ * - Outpost mid-game as conflict consequence (~3–5 min); second city ~5–7 min.
  * - Soft dominance after 15 min nudges a resolve without replacing capital victory.
  *
  * Measured benchmarks: fill via MatchPacingDiagnostics during play / AI-vs-AI runs.
@@ -21,9 +21,10 @@ export const CAPITAL_INFLUENCE_STRENGTH_MUL = 1.25;
  * Timeline targets (wall-clock seconds of sim). Measured may be N/A without a run.
  */
 export const PACING_TARGETS = {
-  firstArmyCommand: 45,
-  firstContact: 180,
-  firstBattle: 300,
+  /** Meaningful army decision should be available immediately. */
+  firstArmyCommand: 20,
+  firstContact: 75,
+  firstBattle: 120,
   firstOutpost: 240,
   /** Delayed second city — not immediate from living village start. */
   secondCity: 360,

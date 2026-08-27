@@ -49,8 +49,10 @@ export class AISystem {
   private readonly thinkInterval = 1.15;
 
   private actionTimer = 0;
-  private nextActionIn = 22;
+  /** Opening pressure: first military move within ~30s. */
+  private nextActionIn = 2.5;
   private expansionCooldown = 0;
+  private openingCommitted = false;
 
   private guardIds = new Set<number>();
   private assaultIds = new Set<number>();
@@ -83,6 +85,7 @@ export class AISystem {
       actionTimer: this.actionTimer,
       nextActionIn: this.nextActionIn,
       expansionCooldown: this.expansionCooldown,
+      openingCommitted: this.openingCommitted,
       guardIds: [...this.guardIds],
       assaultIds: [...this.assaultIds],
       harassIds: [...this.harassIds],
@@ -103,6 +106,7 @@ export class AISystem {
     this.actionTimer = s.actionTimer;
     this.nextActionIn = s.nextActionIn;
     this.expansionCooldown = s.expansionCooldown;
+    this.openingCommitted = s.openingCommitted ?? this.elapsed > 5;
     this.guardIds = new Set(s.guardIds);
     this.assaultIds = new Set(s.assaultIds);
     this.harassIds = new Set(s.harassIds);
@@ -142,6 +146,7 @@ export class AISystem {
     this.cleanupRoles(entities);
     this.defendBase(entities, gameMap);
     this.advanceWaypoints(entities);
+    this.tryOpeningPressure(entities, gameMap);
 
     if (this.thinkTimer >= this.thinkInterval) {
       this.thinkTimer = 0;
@@ -263,20 +268,24 @@ export class AISystem {
   private scheduleNextAction(): number {
     const rng = this.rng!;
     const d = doctrineOf(this.getFaction()?.id ?? 'orcs');
+    // Early game: keep probing — do not park in develop for 40s.
+    if (this.elapsed < 90) {
+      return (10 + rng.next() * 8) * d.aiActionIntervalMul;
+    }
     const base = (() => {
       switch (this.state) {
         case 'develop':
         case 'expand':
         case 'recover':
-          return 36 + rng.next() * 14;
+          return 28 + rng.next() * 12;
         case 'fortify':
-          return 28 + rng.next() * 10;
-        case 'defend':
-          return 16 + rng.next() * 8;
-        case 'raid':
           return 22 + rng.next() * 10;
-        case 'attack':
+        case 'defend':
           return 14 + rng.next() * 8;
+        case 'raid':
+          return 16 + rng.next() * 8;
+        case 'attack':
+          return 12 + rng.next() * 6;
       }
     })();
     return base * d.aiActionIntervalMul;
@@ -536,18 +545,26 @@ export class AISystem {
     const settlement = this.settlements?.get(this.playerId);
     if (!settlement?.hasTownCenter) return;
 
-    // Production — needed for any military posture; still player-queue rules.
+    // Barracks is an upgrade (extra queue / faster train), not an opening gate.
+    const hasBarracks = entities.some(
+      (e) =>
+        e instanceof Building &&
+        e.buildingType === faction.productionBuilding &&
+        e.isConstructed &&
+        !e.isDead &&
+        this.isOwn(e),
+    );
     const barracksNeed = this.treasuryNeed(faction.productionBuilding);
     if (
-      !sit.hasProduction &&
-      this.getGold() >= barracksNeed &&
-      sit.unitPop >= 2
+      !hasBarracks &&
+      this.elapsed >= 55 &&
+      this.getGold() >= barracksNeed + 120 &&
+      sit.armyCount >= 6
     ) {
       this.queueBuildingNearMain(entities, gameMap, main, faction.productionBuilding);
       return;
     }
 
-    if (!sit.hasProduction) return;
     const d = doctrineOf(player.factionId);
 
     // Fortify / Defend: walls & forts via the same strategic catalog as the player.
@@ -727,7 +744,7 @@ export class AISystem {
   }
 
   /**
-   * Recruit complete squads (not individual units).
+   * Recruit complete squads from Capital / Barracks (no mandatory Barracks bootstrap).
    */
   private manageTraining(entities: Entity[]) {
     const faction = this.getFaction();
@@ -740,20 +757,10 @@ export class AISystem {
     const military = this.getMilitary(entities);
     const militaryTarget = this.desiredMilitary(sit);
 
-    const barracks = entities.find(
-      (e): e is Building =>
-        e instanceof Building &&
-        e.buildingType === faction.productionBuilding &&
-        e.isConstructed &&
-        !e.isDead &&
-        this.isOwn(e),
-    );
-    if (!barracks) return;
-
     const squadCount = this.squads?.squadsForOwner(this.playerId).length ?? 0;
-    const squadTarget = Math.max(2, Math.ceil(militaryTarget / 4));
+    const squadTarget = Math.max(3, Math.ceil(militaryTarget / 4));
     if (squadCount >= squadTarget && military.length >= militaryTarget) return;
-    if (this.state === 'develop' && squadCount >= 3 && military.length >= 8) return;
+    if (this.state === 'develop' && squadCount >= 4 && military.length >= 12) return;
 
     const preferRanged = this.shouldTrainRanged(entities, faction, military);
     const template = preferRanged
@@ -946,8 +953,90 @@ export class AISystem {
 
   // --- Offense (only when posture asks for it) ---------------------------
 
+  /**
+   * Immediate opening: Squad A contests bridge / center, Squad B holds alternate
+   * route or nearby gold. Must fire before city pipeline matters (<30s).
+   */
+  private tryOpeningPressure(entities: Entity[], gameMap?: GameMap): boolean {
+    if (this.openingCommitted || this.elapsed < 1.8) return false;
+    const main = this.getMainBuilding(entities);
+    const enemyMain = this.getEnemyMainBuilding(entities);
+    if (!main || !enemyMain || !this.squads) return false;
+
+    const squads = this.squads
+      .squadsForOwner(this.playerId)
+      .filter((s) => s.memberIds.length > 0)
+      .slice()
+      .sort((a, b) => a.id.localeCompare(b.id));
+    if (squads.length === 0) return false;
+
+    const primary =
+      gameMap?.findBridgeToward(main.x, main.y, enemyMain.x, enemyMain.y) ?? null;
+    const alternate = primary && gameMap ? gameMap.findAlternateBridge(primary) : null;
+    const mid = {
+      x: (main.x + enemyMain.x) * 0.5,
+      y: (main.y + enemyMain.y) * 0.5,
+    };
+
+    // Contest point: bridge preferred, else midpoint — never dive enemy capital.
+    let contest = primary ?? mid;
+    if (primary && Math.hypot(primary.x - enemyMain.x, primary.y - enemyMain.y) < 220) {
+      contest = {
+        x: main.x + (mid.x - main.x) * 0.72,
+        y: main.y + (mid.y - main.y) * 0.72,
+      };
+    }
+
+    // Flank: alternate bridge, nearby contested gold, or offset toward enemy.
+    let flank: { x: number; y: number } = alternate ?? {
+      x: main.x + (enemyMain.x - main.x) * 0.35 + 90,
+      y: main.y + (enemyMain.y - main.y) * 0.35 - 70,
+    };
+    let bestGoldDist = Infinity;
+    for (const e of entities) {
+      if (!(e instanceof ResourceNode) || e.isDead) continue;
+      const dMain = Math.hypot(e.x - main.x, e.y - main.y);
+      const dEnemy = Math.hypot(e.x - enemyMain.x, e.y - enemyMain.y);
+      if (dMain < 280 || dMain > 900) continue;
+      if (dEnemy + 80 < dMain) continue; // avoid gold deep in enemy pocket
+      if (dMain < bestGoldDist) {
+        bestGoldDist = dMain;
+        flank = { x: e.x, y: e.y };
+      }
+    }
+
+    const seen = new Set<string>();
+    const a = squads[0]!;
+    const leadA = entities.find(
+      (e): e is Unit => e instanceof Unit && e.id === a.memberIds[0] && !e.isDead,
+    );
+    if (leadA) {
+      this.assaultIds.add(leadA.id);
+      for (const id of a.memberIds) this.assaultIds.add(id);
+      this.orderMove(leadA, contest.x, contest.y, seen);
+    }
+
+    if (squads[1]) {
+      const b = squads[1];
+      const leadB = entities.find(
+        (e): e is Unit => e instanceof Unit && e.id === b.memberIds[0] && !e.isDead,
+      );
+      if (leadB) {
+        this.harassIds.add(leadB.id);
+        for (const id of b.memberIds) this.harassIds.add(id);
+        this.orderMove(leadB, flank.x, flank.y, seen);
+      }
+    }
+
+    this.openingCommitted = true;
+    this.assaultStartCount = Math.max(4, this.getMilitary(entities).length);
+    this.actionTimer = 0;
+    this.nextActionIn = 14;
+    return true;
+  }
+
   private tryMilitaryAction(entities: Entity[], gameMap?: GameMap): boolean {
-    // After early boom, allow light frontier pressure even while developing.
+    // With 2 starter squads (~8), allow light frontier pressure immediately.
     const boomReady = (this.situation?.armyCount ?? 0) >= 4;
     if (
       (this.state === 'develop' || this.state === 'expand' || this.state === 'recover') &&
@@ -955,8 +1044,8 @@ export class AISystem {
     ) {
       const military = this.getMilitary(entities);
       const free = military.filter((u) => !this.guardIds.has(u.id));
-      if (free.length >= 2) {
-        return this.launchHarass(entities, free, gameMap, Math.min(3, free.length));
+      if (free.length >= 3) {
+        return this.launchHarass(entities, free, gameMap, Math.min(4, free.length));
       }
     }
 
@@ -975,21 +1064,21 @@ export class AISystem {
     const rng = this.rng!;
 
     if (this.state === 'defend') {
-      // Light counter-raid only when we still have spare force at home.
       if ((sit?.threatNearBase ?? 0) > 2) return false;
       return this.launchHarass(entities, free, gameMap, 2);
     }
 
     if (this.state === 'raid') {
-      const size = sit && sit.armyRatio >= 1.0 ? 3 : 2;
-      if (free.length >= 3 && rng.chance((sit?.doctrineHarass ?? 0.5) * 0.4)) {
+      // Accept small early fights (4v4 / 4v3) — don't wait for massive superiority.
+      const size = sit && sit.armyRatio >= 1.05 ? 4 : 3;
+      if (free.length >= 4 && rng.chance((sit?.doctrineHarass ?? 0.5) * 0.45)) {
         return this.launchAssault(entities, free, gameMap, false);
       }
-      return this.launchHarass(entities, free, gameMap, size);
+      return this.launchHarass(entities, free, gameMap, Math.min(size, free.length));
     }
 
-    // attack
-    return this.launchAssault(entities, free, gameMap, (sit?.armyRatio ?? 0) >= 1.15);
+    // attack — probe even at ~parity
+    return this.launchAssault(entities, free, gameMap, (sit?.armyRatio ?? 0) >= 1.25);
   }
 
   private launchHarass(
@@ -1066,7 +1155,8 @@ export class AISystem {
     const faction = this.getFaction();
     if (!faction) return false;
 
-    const minSize = allIn ? 3 : 2;
+    // Early skirmish sizes OK (e.g. 4v4) — don't require a deathball.
+    const minSize = allIn ? 4 : 3;
     if (free.length < minSize) return false;
 
     const target = this.pickSiegeTarget(entities);
